@@ -220,6 +220,18 @@ ${designSystem}
     // 사이드바·GNB 활성 메뉴 (기능 아님, 현재 위치 맥락만)
     if (f.activeNav) lines.push(`> 현재 위치: 사이드바/GNB에서 [${f.activeNav}] 활성화됨 (기능 명세 대상 아님)`);
 
+    // 선택 영역 내 코멘트/주석 — 화면 의도·예외·정책 맥락 보강
+    if (Array.isArray(f.annotations) && f.annotations.length) {
+      const annotationLines = f.annotations.slice(0, 30).map((a, idx) => {
+        const anchor = a.anchor && typeof a.anchor.x === 'number' && typeof a.anchor.y === 'number'
+          ? ` @(${a.anchor.x.toFixed(2)}, ${a.anchor.y.toFixed(2)})`
+          : '';
+        const label = a.nodeName ? ` [${a.nodeName}]` : '';
+        return `  ${idx + 1}. ${String(a.text || '').trim()}${label}${anchor}`;
+      });
+      lines.push(`### [선택 영역 내 코멘트·주석]\n${annotationLines.join('\n')}`);
+    }
+
     // Tier 1 — 페이지 목적
     if (f.titles?.length)   lines.push(`### [목적] 타이틀: ${f.titles.join(', ')}`);
     if (f.tabs?.length)     lines.push(`### [목적] 탭/메뉴: ${f.tabs.join(', ')}`);
@@ -296,6 +308,12 @@ ${imageSection}${designSystemSection}## 핵심 원칙 — 반드시 지킬 것
 - 화면에 없는 기능은 절대 추가하지 마세요. 도메인 상식이나 일반적인 서비스 패턴으로 기능을 지어내지 마세요.
 - 각 기능은 반드시 아래 화면 정보의 어떤 요소(버튼, 인풋, 탭, 테이블 등)에서 근거했는지 대응되어야 합니다.
 - 화면 정보에 없는 요소(예: 화면에 없는 버튼, 존재하지 않는 탭)는 기능으로 만들지 마세요.
+
+**선택 영역 내 코멘트·주석 반영 규칙**
+- Figma에서 선택한 프레임/영역 안에 포함된 코멘트·주석·메모는 화면 의도, 정책, 예외 조건, 부가 설명을 이해하기 위한 핵심 맥락입니다.
+- 코멘트·주석은 기능을 새로 지어내는 근거가 아니라, 선택 영역 안의 실제 UI 요소를 더 정확히 해석하기 위한 보조 근거로 사용하세요.
+- 코멘트·주석이 특정 버튼/인풋/표/모달 조건을 설명하면 해당 기능의 FE/BE 할 일에 자연스럽게 반영하세요.
+- 선택 영역 밖의 코멘트·주석은 입력에 포함하지 않았으므로 추정해서 반영하지 마세요.
 
 ${includeCommon ? `**공통 기능 명세 모드 (🧱 공통기능 읽기 = ON)**
 이번 분석은 **GNB·사이드바·설정·프로필 등 공통 영역도 명세 대상에 포함**합니다.
@@ -1331,7 +1349,8 @@ ${wantsError ? '- 에러케이스 페이지: 페이지 오류, 데이터 로딩 
         const prevCount = Array.isArray(previousFeatures) ? previousFeatures.length : 0;
         const effMode = (mode === 'exception') ? 'exception' : 'spec';
         const reqFlags = { edge: !!requestEdge, error: !!requestError };
-        console.log(`[분석 요청] mode=${effMode} | 프레임 ${frameData.length}개 | 문서: ${hasDocs ? '있음' : '없음'} | 누적: ${prevCount} | 공통기능: ${includeCommon ? 'ON' : 'OFF'}${effMode === 'exception' ? ' | exc: edge=' + reqFlags.edge + ' err=' + reqFlags.error : ''}`);
+        const annotationCount = frameData.reduce((sum, f) => sum + (Array.isArray(f.annotations) ? f.annotations.length : 0), 0);
+        console.log(`[분석 요청] mode=${effMode} | 프레임 ${frameData.length}개 | 코멘트·주석 ${annotationCount}개 | 문서: ${hasDocs ? '있음' : '없음'} | 누적: ${prevCount} | 공통기능: ${includeCommon ? 'ON' : 'OFF'}${effMode === 'exception' ? ' | exc: edge=' + reqFlags.edge + ' err=' + reqFlags.error : ''}`);
 
         // ── 화면 이미지 저장 (비전 분석용) ──
         const imgDir = path.join(__dirname, 'logs');

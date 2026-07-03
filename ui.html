@@ -1121,8 +1121,8 @@
     document.getElementById(btnId).disabled = true;
     document.getElementById('copyAllBtn').style.display = 'none';
     document.getElementById('results').innerHTML = '';
-    setStatus('선택된 프레임 분석 중...', 'loading');
-    Progress.begin('프레임 구조 분석 중', 0, 10, 3, true);
+    setStatus('선택된 프레임과 영역 내 코멘트·주석 분석 중...', 'loading');
+    Progress.begin('프레임 구조와 주석 맥락 분석 중', 0, 10, 3, true);
 
     const includeCommon = mode === 'exception'
       ? document.getElementById('optCommonE').checked

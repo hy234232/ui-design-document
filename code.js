@@ -1428,6 +1428,157 @@ function absBox(node) {
   return node && node.absoluteBoundingBox ? node.absoluteBoundingBox : null;
 }
 
+function boxesIntersect(a, b) {
+  if (!a || !b) return false;
+  return !(
+    a.x + a.width < b.x ||
+    b.x + b.width < a.x ||
+    a.y + a.height < b.y ||
+    b.y + b.height < a.y
+  );
+}
+
+function boxCenter(box) {
+  return box ? { x: box.x + box.width / 2, y: box.y + box.height / 2 } : null;
+}
+
+function pointInBox(point, box) {
+  if (!point || !box) return false;
+  return (
+    point.x >= box.x &&
+    point.x <= box.x + box.width &&
+    point.y >= box.y &&
+    point.y <= box.y + box.height
+  );
+}
+
+function relativeAnchor(box, rootBox) {
+  const p = boxCenter(box);
+  if (!p || !rootBox || !rootBox.width || !rootBox.height) return null;
+  return {
+    x: Math.max(0, Math.min(1, (p.x - rootBox.x) / rootBox.width)),
+    y: Math.max(0, Math.min(1, (p.y - rootBox.y) / rootBox.height)),
+  };
+}
+
+const COMMENT_NODE_RE = /comment|annotation|annot|note|memo|sticky|pin|주석|코멘트|댓글|메모|설명|기획|정책|요구사항|참고/i;
+
+function stringifyAnnotationValue(value, depth) {
+  if (value === null || value === undefined || depth > 3) return '';
+  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (Array.isArray(value)) {
+    return value.map(v => stringifyAnnotationValue(v, depth + 1)).filter(Boolean).join(' / ');
+  }
+  if (typeof value === 'object') {
+    const preferred = ['text', 'description', 'body', 'content', 'label', 'title', 'name', 'value'];
+    const parts = [];
+    for (const key of preferred) {
+      if (value[key] !== undefined) {
+        const text = stringifyAnnotationValue(value[key], depth + 1);
+        if (text) parts.push(text);
+      }
+    }
+    if (parts.length) return parts.join(' / ');
+    return Object.keys(value)
+      .slice(0, 8)
+      .map(key => {
+        const text = stringifyAnnotationValue(value[key], depth + 1);
+        return text ? `${key}: ${text}` : '';
+      })
+      .filter(Boolean)
+      .join(' / ');
+  }
+  return '';
+}
+
+function readNativeAnnotations(node) {
+  const found = [];
+  const props = ['annotations', 'annotation'];
+  for (const prop of props) {
+    try {
+      const value = node && node[prop];
+      const text = stringifyAnnotationValue(value, 0);
+      if (text) found.push(text);
+    } catch (e) { /* property may not be available in this Figma runtime */ }
+  }
+  return found;
+}
+
+function isCommentLikeNode(node) {
+  if (!node) return false;
+  const name = String(node.name || '');
+  if (COMMENT_NODE_RE.test(name)) return true;
+  if (node.type === 'TEXT') {
+    const text = String(node.characters || '').trim();
+    return COMMENT_NODE_RE.test(text) || /^(TODO|NOTE|COMMENT|주석|코멘트|댓글|메모)\s*[:：-]/i.test(text);
+  }
+  return false;
+}
+
+function commentNodeText(node) {
+  if (!node) return '';
+  if (node.type === 'TEXT') return String(node.characters || '').trim();
+  const text = nodeTextContent(node).trim();
+  return text || String(node.name || '').trim();
+}
+
+function pushAnnotationItem(out, seen, item) {
+  const text = String(item && item.text || '').replace(/\s+/g, ' ').trim();
+  if (!text || text.length < 2) return;
+  const key = `${item.nodeId || ''}|${item.source || ''}|${text}`;
+  if (seen[key]) return;
+  seen[key] = true;
+  out.push(Object.assign({}, item, { text: text.slice(0, 500) }));
+}
+
+function collectAnnotationsForRoot(root, rootBox) {
+  const out = [];
+  const seen = {};
+  walkNode(root, function (node) {
+    const b = absBox(node);
+    const nativeTexts = readNativeAnnotations(node);
+    for (const text of nativeTexts) {
+      pushAnnotationItem(out, seen, {
+        source: 'figma-annotation',
+        nodeId: node.id,
+        nodeName: node.name,
+        nodeType: node.type,
+        text,
+        anchor: relativeAnchor(b, rootBox),
+      });
+    }
+    if (isCommentLikeNode(node)) {
+      pushAnnotationItem(out, seen, {
+        source: 'comment-layer',
+        nodeId: node.id,
+        nodeName: node.name,
+        nodeType: node.type,
+        text: commentNodeText(node),
+        anchor: relativeAnchor(b, rootBox),
+      });
+    }
+  });
+  return out.slice(0, 80);
+}
+
+function collectPageCommentNodesInSelection(selectionBounds, selectedRoots) {
+  if (!selectionBounds || !figma.currentPage || typeof figma.currentPage.findAll !== 'function') return [];
+  const roots = selectedRoots || [];
+  const out = [];
+  try {
+    const nodes = figma.currentPage.findAll(function (node) {
+      if (!isCommentLikeNode(node)) return false;
+      if (roots.some(root => isDescendantOf(node, root))) return false;
+      const b = absBox(node);
+      const center = boxCenter(b);
+      return !!(b && boxesIntersect(b, selectionBounds) && pointInBox(center, selectionBounds));
+    });
+    for (const node of nodes) out.push(node);
+  } catch (e) { /* page scan may be unavailable in some files */ }
+  return out.slice(0, 80);
+}
+
 function isDescendantOf(node, ancestor) {
   let cur = node;
   while (cur) {
@@ -2660,6 +2811,41 @@ figma.ui.onmessage = async (msg) => {
       for (let i = 0; i < frames.length && i < selectionNodeIds.length; i++) {
         frames[i].nodeId = selectionPageFrameIds[i] || selectionNodeIds[i];
         frames[i].selectedNodeId = selectionNodeIds[i];
+      }
+
+      // ── 선택 영역 내 코멘트/주석 수집 ──
+      // Figma 일반 댓글 API는 플러그인 런타임에서 제한될 수 있으므로,
+      // 접근 가능한 Dev annotation 속성과 선택 영역 내부의 주석성 레이어/메모 노드를 함께 읽는다.
+      // 선택 영역 밖의 코멘트/주석은 문서 생성 맥락에 섞지 않는다.
+      for (let i = 0; i < frames.length && i < sel.length; i++) {
+        const rootBox = sel[i].absoluteBoundingBox || selectionBounds;
+        frames[i].annotations = collectAnnotationsForRoot(sel[i], rootBox);
+      }
+      const pageCommentNodes = collectPageCommentNodesInSelection(selectionBounds, sel);
+      for (const commentNode of pageCommentNodes) {
+        const cb = absBox(commentNode);
+        const item = {
+          source: 'comment-layer-in-selection',
+          nodeId: commentNode.id,
+          nodeName: commentNode.name,
+          nodeType: commentNode.type,
+          text: commentNodeText(commentNode),
+        };
+        let attached = false;
+        for (let i = 0; i < frames.length && i < sel.length; i++) {
+          const rootBox = sel[i].absoluteBoundingBox || selectionBounds;
+          const center = boxCenter(cb);
+          if (pointInBox(center, rootBox) || boxesIntersect(cb, rootBox)) {
+            frames[i].annotations = frames[i].annotations || [];
+            frames[i].annotations.push(Object.assign({}, item, { anchor: relativeAnchor(cb, rootBox) }));
+            attached = true;
+            break;
+          }
+        }
+        if (!attached && frames[0]) {
+          frames[0].annotations = frames[0].annotations || [];
+          frames[0].annotations.push(Object.assign({}, item, { anchor: relativeAnchor(cb, selectionBounds) }));
+        }
       }
 
       // ── 화면 이미지 내보내기 (비전 분석용) ──
