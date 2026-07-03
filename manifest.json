@@ -1,0 +1,9 @@
+{
+  "name": "핸드오프문서 자동생성기",
+  "id": "feature-spec-generator",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": ["figma"],
+  "permissions": ["currentuser"]
+}

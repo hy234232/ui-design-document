@@ -1,0 +1,1122 @@
+#!/usr/bin/env node
+// 기능 명세 생성기 — Claude Code CLI 브릿지 서버
+// 실행: node server.js  (API 키 불필요, Claude Code 로그인 상태 사용)
+
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { spawn } = require('child_process');
+const { execSync, execFileSync } = require('child_process');
+
+const PORT = 3765;
+const MODEL = 'claude-sonnet-4-6'; // 생성에 사용하는 모델 (변경 시 하단 메타에 그대로 반영됨)
+const DESIGN_SYSTEM_PATH = path.join(__dirname, '디자인시스템.md');
+const COMPONENT_REPO_URL = 'https://github.com/hy0909/designsystem.git';
+const COMPONENT_REPO_BRANCH = 'main';
+const COMPONENT_REPO_WORKDIR = path.join(__dirname, '.github-sync', 'designsystem');
+const COMPONENT_GITHUB_BASE = 'https://github.com/hy0909/designsystem/blob/main';
+
+// 디자인시스템.md 로드 — 매 분석 요청마다 호출되어 최신 내용을 반영.
+// 파일이 없거나 읽기 실패 시 빈 문자열 반환(분석은 계속 진행, 단순 폴백).
+function loadDesignSystem() {
+  try {
+    if (!fs.existsSync(DESIGN_SYSTEM_PATH)) return '';
+    let text = fs.readFileSync(DESIGN_SYSTEM_PATH, 'utf8');
+    // 너무 큰 경우 컷 (40000자 ≈ 10K 토큰)
+    if (text.length > 40000) text = text.slice(0, 40000) + '\n\n... (이하 생략 — 파일이 너무 큼)';
+    return text;
+  } catch (e) {
+    console.warn('[디자인시스템 로드 실패]', e.message);
+    return '';
+  }
+}
+
+function sh(cmd, cwd) {
+  return execSync(cmd, {
+    cwd: cwd || __dirname,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim();
+}
+
+function git(args, cwd) {
+  return execFileSync('git', args, {
+    cwd: cwd || __dirname,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim();
+}
+
+function shortHash(input) {
+  input = String(input || '');
+  let h = 5381;
+  for (let i = 0; i < input.length; i++) h = ((h << 5) + h) + input.charCodeAt(i);
+  return Math.abs(h >>> 0).toString(36).slice(0, 6);
+}
+
+function slugifyAscii(input, fallback) {
+  const slug = String(input || '')
+    .toLowerCase()
+    .replace(/\.md$/i, '')
+    .replace(/[^a-z0-9._-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return slug || fallback || 'item';
+}
+
+function componentScopedFilename(projectName, componentFilename, componentName, fileKey) {
+  const projectRaw = String(projectName || fileKey || 'figma-project').trim();
+  const projectSlug = slugifyAscii(projectRaw, 'project-' + shortHash(projectRaw));
+  const componentBase = String(componentFilename || componentName || 'component')
+    .replace(/\.md$/i, '');
+  const componentSlug = slugifyAscii(componentBase, 'component-' + shortHash(componentName || componentBase));
+  return `${projectSlug}-${componentSlug}.md`;
+}
+
+function ensureComponentRepo() {
+  const parent = path.dirname(COMPONENT_REPO_WORKDIR);
+  if (!fs.existsSync(parent)) fs.mkdirSync(parent, { recursive: true });
+
+  if (!fs.existsSync(path.join(COMPONENT_REPO_WORKDIR, '.git'))) {
+    git(['clone', COMPONENT_REPO_URL, COMPONENT_REPO_WORKDIR], __dirname);
+  }
+
+  try { git(['checkout', COMPONENT_REPO_BRANCH], COMPONENT_REPO_WORKDIR); } catch (e) { /* branch may already be default */ }
+  git(['pull', '--ff-only', 'origin', COMPONENT_REPO_BRANCH], COMPONENT_REPO_WORKDIR);
+}
+
+function publishComponentMdToGithub(filename, markdown, componentName) {
+  ensureComponentRepo();
+
+  const repoDesignDir = path.join(COMPONENT_REPO_WORKDIR, 'design-system');
+  if (!fs.existsSync(repoDesignDir)) fs.mkdirSync(repoDesignDir, { recursive: true });
+  const repoOutPath = path.join(repoDesignDir, filename);
+  fs.writeFileSync(repoOutPath, markdown, 'utf8');
+
+  git(['add', `design-system/${filename}`], COMPONENT_REPO_WORKDIR);
+  const status = git(['status', '--short'], COMPONENT_REPO_WORKDIR);
+  if (!status) {
+    return { committed: false, pushed: false, reason: 'no changes' };
+  }
+
+  const safeName = String(componentName || filename).trim() || filename;
+  git(['commit', '-m', `Add ${safeName} component spec`], COMPONENT_REPO_WORKDIR);
+  git(['push', 'origin', COMPONENT_REPO_BRANCH], COMPONENT_REPO_WORKDIR);
+  return { committed: true, pushed: true };
+}
+
+// Claude Code CLI 경로 탐색
+function findClaudeCLI() {
+  // Claude Desktop 앱 내장 CLI — 버전 폴더를 동적으로 탐색
+  const claudeCodeDir = `${process.env.HOME}/Library/Application Support/Claude/claude-code`;
+  try {
+    const versions = require('fs').readdirSync(claudeCodeDir).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+    for (const ver of versions) {
+      const p = `${claudeCodeDir}/${ver}/claude.app/Contents/MacOS/claude`;
+      try {
+        execSync(`test -x "${p}"`, { stdio: 'ignore' });
+        return p;
+      } catch { /* skip */ }
+    }
+  } catch { /* dir not found */ }
+
+  const candidates = [
+    '/usr/local/bin/claude',
+    '/opt/homebrew/bin/claude',
+    `${process.env.HOME}/.npm-global/bin/claude`,
+    `${process.env.HOME}/.local/bin/claude`,
+  ];
+  for (const p of candidates) {
+    try {
+      execSync(`test -x "${p}"`, { stdio: 'ignore' });
+      return p;
+    } catch { /* skip */ }
+  }
+  // PATH에서 탐색
+  try { return execSync('which claude', { encoding: 'utf8' }).trim(); } catch { return null; }
+}
+
+let cachedClaudePath = null;
+
+function isExecutable(filePath) {
+  if (!filePath) return false;
+  try {
+    fs.accessSync(filePath, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function getClaudeCLI(forceRefresh = false) {
+  if (!forceRefresh && isExecutable(cachedClaudePath)) return cachedClaudePath;
+  cachedClaudePath = findClaudeCLI();
+  return cachedClaudePath;
+}
+
+const initialClaudePath = getClaudeCLI(true);
+
+if (!initialClaudePath) {
+  console.error('[오류] Claude Code CLI를 찾을 수 없습니다.');
+  console.error('  Claude Desktop 앱이 설치되어 있는지 확인하거나');
+  console.error('  npm install -g @anthropic-ai/claude-code 로 설치해주세요.');
+  process.exit(1);
+}
+
+console.log(`[정보] Claude CLI: ${initialClaudePath}`);
+
+// ── 프롬프트 ──
+function buildPrompt(frameData, docSection, hasDocs, imagePaths, previousFeatures, includeCommon, mode, reqFlags) {
+  previousFeatures = Array.isArray(previousFeatures) ? previousFeatures.filter(Boolean) : [];
+  includeCommon = !!includeCommon;
+  mode = (mode === 'exception') ? 'exception' : 'spec';
+  reqFlags = reqFlags || {};
+  var wantEdge = !!reqFlags.edge;
+  var wantError = !!reqFlags.error;
+  // Corner Case는 더 이상 별도가 아님 — Edge Case 안에 흡수되고 tag="복잡/희귀"로 구분
+  if (mode === 'exception' && !wantEdge && !wantError) {
+    wantEdge = wantError = true;
+  }
+
+  // 디자인시스템 정의 (매 요청마다 최신 파일 읽음)
+  var designSystem = loadDesignSystem();
+  var designSystemSection = designSystem ? `## 디자인시스템 정의 — 최우선 적용 (Spec-of-Record)
+아래 디자인시스템 정의는 이 화면에서 도출되는 **모든 기능의 FE/BE 할일에 무조건 일관 적용**됩니다.
+- 표준 문구가 정의된 컴포넌트(토스트·모달·인풋·차트 등)는 정의된 문구를 **거의 그대로 사용**하세요.
+  - 예: 토스트가 화면에 있거나 액션 피드백이 필요하면 → FE: "토스트 알림 표시 — fade-in 후 3초 뒤 fade-out으로 자동 사라짐" (디자인시스템 정의 그대로).
+  - 예: 모달이 감지되면 → FE에 "모달 표시/딤 오버레이 + (취소/닫기/아니오) 버튼·X 버튼·딤 배경 클릭으로 닫기 + 닫을 때 딤 배경 해제 + 필요 시 변경 롤백 + 포커스 트랩·폼 검증" 포함.
+  - 예: 비활성 필드 → "읽기 전용으로 표시" 명시.
+- 단위 표기는 디자인시스템 표를 그대로 사용 (원·회·명·%·도 등).
+- 색상·타이포·접근성 규칙도 명시된 대로 적용.
+- 디자인시스템에 정의되지 않은 컴포넌트만 LLM 추론으로 결정.
+- 디자인시스템과 화면이 충돌하면 화면 우선, 단 모호한 부분은 디자인시스템으로 결정.
+
+### 컴포넌트별 상세 명세 링크(docLink) 자동 첨부 규칙 — NEW (중요)
+디자인시스템 정의에서 컴포넌트 섹션마다 다음 형식의 줄을 찾으세요:
+\`- **상세 명세 (GitHub)**: [표시명](URL)\`
+
+기능이 해당 컴포넌트(예: 토스트, 모달, 인풋 등)를 사용하면 그 feature의 \`docLink\` 필드에 다음과 같이 첨부하세요:
+\`"docLink": { "label": "Toast 상세 명세", "url": "https://github.com/.../toast-notification.md" }\`
+
+- url은 디자인시스템.md에 적힌 그대로(PLACEHOLDER 포함이어도 그대로) 복사.
+- 한 기능이 여러 컴포넌트를 쓰면 **가장 핵심적인 하나의 컴포넌트** docLink만 첨부.
+- 해당 컴포넌트에 GitHub 링크가 정의돼 있지 않으면 \`docLink\`는 생략(또는 null).
+- features·edgeCases·errorCases·cornerCases 모두 적용. 모달·토스트·인풋·차트·인사이트 알럿 등 디자인시스템 정의가 있는 모든 컴포넌트 대상.
+
+---
+${designSystem}
+---
+` : '';
+  imagePaths = imagePaths || [];
+  // frameData는 이제 { frameName, allTexts, buttons, inputs, tabs, structure } 배열
+  const pageContext = frameData.map(f => {
+    const lines = [];
+    lines.push(`## 페이지: "${f.frameName}"`);
+
+    // 사이드바·GNB 활성 메뉴 (기능 아님, 현재 위치 맥락만)
+    if (f.activeNav) lines.push(`> 현재 위치: 사이드바/GNB에서 [${f.activeNav}] 활성화됨 (기능 명세 대상 아님)`);
+
+    // Tier 1 — 페이지 목적
+    if (f.titles?.length)   lines.push(`### [목적] 타이틀: ${f.titles.join(', ')}`);
+    if (f.tabs?.length)     lines.push(`### [목적] 탭/메뉴: ${f.tabs.join(', ')}`);
+    if (f.sections?.length) lines.push(`### [목적] 섹션: ${f.sections.join(', ')}`);
+
+    // Tier 2 — 사용자 액션
+    if (f.buttons?.length)     lines.push(`### [액션] 버튼: ${f.buttons.join(', ')}`);
+    if (f.iconActions?.length) lines.push(`### [액션] 아이콘버튼: ${f.iconActions.join(', ')}`);
+    if (f.links?.length)       lines.push(`### [액션] 링크: ${f.links.join(', ')}`);
+
+    // Tier 3 — 데이터 구조
+    if (f.inputs?.length)       lines.push(`### [데이터] 입력필드: ${f.inputs.join(', ')}`);
+    if (f.disabledFields?.length) lines.push(`### [데이터·비활성] 비활성 입력필드(기능 도출 금지): ${f.disabledFields.join(', ')}`);
+    if (f.selects?.length)      lines.push(`### [데이터] 셀렉트/드롭다운: ${f.selects.join(', ')}`);
+    if (f.tableHeaders?.length) lines.push(`### [데이터] 테이블컬럼: ${f.tableHeaders.join(', ')}`);
+    if (f.hasTable)             lines.push(`### [데이터·테이블] 테이블/목록이 있음 (테이블 규칙 적용)`);
+    if (f.hasScroll)            lines.push(`### [데이터·스크롤] 스크롤 영역이 감지됨 (스크롤 규칙 적용)`);
+    if (f.listItems?.length)    lines.push(`### [데이터] 리스트아이템: ${f.listItems.slice(0, 5).join(', ')}`);
+    if (f.uploads?.length)      lines.push(`### [데이터] 파일업로드: ${f.uploads.join(', ')}`);
+
+    // Tier 4 — 상태와 조건
+    if (f.checkboxes?.length)  lines.push(`### [상태] 체크박스: ${f.checkboxes.join(', ')}`);
+    if (f.radios?.length)      lines.push(`### [상태] 라디오: ${f.radios.join(', ')}`);
+    if (f.toggles?.length)     lines.push(`### [상태] 토글: ${f.toggles.join(', ')}`);
+    if (f.badges?.length)      lines.push(`### [상태] 뱃지/태그: ${f.badges.join(', ')}`);
+    if (f.emptyStates?.length) lines.push(`### [상태] 빈화면: ${f.emptyStates.join(', ')}`);
+    if (f.alerts?.length)      lines.push(`### [상태] 알럿/에러: ${f.alerts.join(', ')}`);
+    if (f.toasts?.length)      lines.push(`### [상태] 토스트/스낵바: ${f.toasts.join(', ')} (토스트 알림 규칙 적용)`);
+
+    // Tier 5 — 플로우
+    if (f.hasDimOverlay) lines.push(`### [플로우·모달] 딤(dim) 처리된 배경이 감지됨 → 이 화면에는 모달/다이얼로그가 떠 있습니다.`);
+    if (f.modals?.length)      lines.push(`### [플로우] 모달/다이얼로그: ${f.modals.join(', ')} (모달 UI로 읽고 모달 구현 기능을 명세에 포함할 것)`);
+    if (f.drawers?.length)     lines.push(`### [플로우] 드로어: ${f.drawers.join(', ')}`);
+    if (f.steppers?.length)    lines.push(`### [플로우] 스텝퍼: ${f.steppers.join(', ')}`);
+    if (f.paginations?.length) lines.push(`### [플로우] 페이지네이션: ${f.paginations.join(', ')}`);
+
+    // Tier 6 — 컴포넌트 Variant
+    if (f.componentVariants?.length) {
+      lines.push(`### [컴포넌트] Variants:\n  ${f.componentVariants.slice(0, 10).join('\n  ')}`);
+    }
+
+    // 텍스트 (도메인 언어)
+    if (f.allTexts?.length) {
+      lines.push(`### [텍스트] 화면 내 레이블·설명·상태:\n  ${f.allTexts.slice(0, 60).join('\n  ')}`);
+    }
+
+    return lines.join('\n');
+  }).join('\n\n---\n\n');
+
+  const imageSection = imagePaths.length
+    ? `## 화면 이미지 (가장 중요 — 반드시 먼저 볼 것)
+아래 이미지 파일을 **Read 도구로 직접 열어** 화면을 눈으로 보고 분석하세요. 레이어 이름이 "Rectangle 6643"처럼 의미 없어도, 이미지에 보이는 **실제 글자·버튼·입력창·표·드롭다운**이 진짜 근거입니다.
+${imagePaths.map((p, i) => `- 화면 ${i + 1}: @${p}`).join('\n')}
+
+**이미지에서 직접 읽어야 할 것:**
+- 버튼에 적힌 글자 (예: "초대", "저장", "내보내기")
+- 입력창의 placeholder·라벨 (예: "이메일", "이름 입력")
+- 표(테이블)의 컬럼명과 셀 내용 (예: 권한 컬럼의 "소유자/관리자/일반회원")
+- 드롭다운·셀렉트의 선택지
+- 타이틀·섹션 제목
+- **모달/팝업**: 배경이 어둡게 딤(dim) 처리되고 가운데에 카드가 떠 있으면 모달입니다. 모달 제목·입력·버튼을 읽고 "모달 구현" 기능으로 명세하세요.
+아래 레이어 구조 정보는 **보조 자료**일 뿐입니다. 이미지에 보이는 것이 우선입니다.
+
+---
+`
+    : '';
+
+  return `당신은 경력 20년의 시니어 PM입니다.
+아래 Figma 화면 ${imagePaths.length ? '이미지와 ' : ''}정보를 바탕으로 기능 명세를 작성하세요.
+
+---
+${imageSection}${designSystemSection}## 핵심 원칙 — 반드시 지킬 것
+**화면에 실제로 존재하는 UI 요소에서만 기능을 도출하세요.**
+- 화면에 없는 기능은 절대 추가하지 마세요. 도메인 상식이나 일반적인 서비스 패턴으로 기능을 지어내지 마세요.
+- 각 기능은 반드시 아래 화면 정보의 어떤 요소(버튼, 인풋, 탭, 테이블 등)에서 근거했는지 대응되어야 합니다.
+- 화면 정보에 없는 요소(예: 화면에 없는 버튼, 존재하지 않는 탭)는 기능으로 만들지 마세요.
+
+${includeCommon ? `**공통 기능 명세 모드 (🧱 공통기능 읽기 = ON)**
+이번 분석은 **GNB·사이드바·설정·프로필 등 공통 영역도 명세 대상에 포함**합니다.
+- 화면에 보이는 GNB 메뉴(예: "홈/판매 순위/시간대별 통계/고객 세그먼트")는 각각의 페이지 이동 기능으로 명세하세요. 예: "홈 화면 이동", "판매 순위 화면 이동" — FE: 라우팅 + 활성 메뉴 강조, BE: (없거나 권한 조회).
+- 좌측 상단 지점 셀렉트, 우측 상단 설정 아이콘·프로필 아바타·로그아웃 등도 기능으로 명세하세요.
+- 「현재 위치:」 표시(activeNav)는 어떤 메뉴가 활성화돼 있는지의 맥락 힌트일 뿐 — 그것 자체를 기능으로 만들지는 마세요. 단, "활성 메뉴 강조 표시"는 FE 할일에 명시.
+- anchor 좌표는 해당 공통 UI의 화면상 위치(상단 헤더는 보통 y ≤ 0.06, 좌측 사이드바는 x ≤ 0.2)를 정확히 측정해서 반환.
+- features 배열에 공통 기능들을 자연스럽게 포함시키되, 페이지 고유 기능과 섞어도 OK.` : `**사이드바·GNB 규칙 (중요)**
+- 「현재 위치:」 로 표시된 사이드바/GNB 항목은 **기능 명세 대상이 아닙니다.** 기능으로 추가하지 마세요.
+- 사이드바·GNB는 내비게이션 쉘이며, 어떤 메뉴가 활성화됐는지는 현재 화면의 **맥락 힌트**로만 사용하세요.
+- 사이드바·GNB 관련 기능(메뉴 클릭, 라우팅 등)은 명세에 포함하지 않습니다.`}
+
+**액션 우선 규칙 (중요)**
+- 핵심 기능은 [액션] 버튼과 [데이터] 셀렉트의 **동작**에서 나옵니다. 버튼/셀렉트 텍스트를 그대로 기능명으로 쓰세요.
+  - 예: "초대" 버튼 + "이메일" 입력 → "구성원 초대" / "소유자·관리자·일반회원" 셀렉트 → "구성원 권한 변경" / "내보내기"·"소속 해제" 버튼 → "구성원 내보내기"
+- 단순 정보 표시 영역(읽기 전용 타이틀·라벨)만 보고 "○○ 정보 입력" 같은 기능을 만들지 마세요. 실제 입력/액션 요소가 있을 때만 입력 기능을 도출합니다.
+
+**비활성(disabled) 필드 규칙 (중요)**
+- 「[데이터·비활성]」 으로 표시된 필드는 **읽기 전용**입니다. 입력·수정·"입력 전/후 상태 전환" 같은 기능을 절대 만들지 마세요.
+- 비활성 필드는 사용자 입력 기능의 근거가 될 수 없습니다.
+- **다만 비활성 필드의 존재는 반드시 명세에 언급하세요(빼먹지 말 것).** 입력 기능이 아니라 **"읽기 전용 조회/표시"** 기능으로 적습니다.
+  - 기능명에 해당 필드를 명시하고, **그 필드가 비활성(읽기 전용)으로 표시된다는 점을 분명히** 적으세요.
+  - 예: "기본 정보" 영역의 회사명 필드가 비활성(회색)이면 → **회사 기본정보 조회(읽기 전용)** / FE: 회사명 등 기본정보를 **비활성(읽기 전용)** 으로 표시, 수정 불가 / BE: 회사 기본정보 조회 API
+  - 즉, 비활성 필드는 "수정 기능"은 만들지 않되 "읽기 전용으로 보여준다"는 사실은 반드시 명세에 드러나야 합니다.
+
+**모달·다이얼로그 규칙 (중요)**
+- 화면에 **딤(dim) 처리된 어두운 반투명 배경 + 그 위에 뜬 중앙 카드**가 보이면, 그것은 일반 영역이 아니라 **모달(다이얼로그/팝업)** 입니다. 반드시 모달로 인식하세요.
+- 이미지에서 배경이 어둡게 깔리고 가운데에 흰 카드(제목·입력·버튼 포함)가 있으면 모달입니다. 「[플로우·모달] 딤 처리…」 표시가 있으면 모달이 떠 있는 상태입니다.
+- 모달을 발견하면 **반드시 모달 구현 기능을 명세에 포함**하세요. 기능명에 "모달"을 명시합니다.
+- **모달 닫기 동작은 항상 아래 3가지를 모두 명세에 적습니다 (예외 없음):**
+  1. **취소/닫기 버튼** — 화면에 보이는 실제 버튼명을 확인해서 적으세요. "취소"·"닫기"·"아니오" 중 화면에 있는 라벨 그대로 사용 (임의로 지어내지 말 것).
+  2. **X(닫기) 아이콘 버튼** — 모달 우상단 X 버튼.
+  3. **모달 외 영역(딤 처리된 배경) 클릭** 시 닫기.
+- 모달을 닫을 때는 **딤 배경(오버레이)도 함께 해제(제거)** 한다는 점을 항상 명세에 적으세요.
+- 닫을 때 입력/변경 중이던 내용이 있으면 **필요 시 변경 사항 롤백(되돌리기) 처리**도 FE 할일에 적으세요.
+- 따라서 모달 기능의 FE 할일에는 최소한: **모달 표시/딤 오버레이 + (취소/닫기/아니오 — 실제 라벨) 버튼·X 버튼·딤 배경 클릭으로 닫기 + 닫을 때 딤 배경 해제 + 필요 시 변경 롤백 + 포커스 트랩·폼 검증**이 들어갑니다.
+- 모달 뒤의 딤 처리된(흐려진) 본문 요소는 모달에 가려진 상태이므로, 그것들로 별도 기능을 또 만들지 말고 모달 내용에 집중하세요.
+- (예외) 모달 기능의 FE 할일은 닫기 동작 3종을 모두 담아야 하므로 40자 제한을 넘겨도 됩니다.
+
+**토스트 알림 규칙 (고정 — 항상 동일하게 명세)**
+- 화면에 토스트/스낵바(저장 완료, 전송됨, 오류 등 일시 알림)가 있거나, 액션 성공/실패 피드백이 필요하면 토스트 동작을 명세에 포함하세요.
+- **토스트는 항상 다음 동작으로 고정해서 적습니다:** "**3초 뒤 자동으로 사라지며, 서서히 나타났다가(fade-in) 서서히 사라진다(fade-out)**".
+- 토스트 FE 할일 표준형: 「토스트 알림 표시 — fade-in 후 3초 뒤 fade-out으로 자동 사라짐」.
+
+**위치 좌표(anchor) 규칙 — 매우 중요 (NEW)**
+- 각 기능마다 화면에서 그 기능의 **트리거 UI 요소가 위치한 좌표**를 \`anchor\` 객체로 반환하세요.
+- \`anchor.x\`: 0~1 사이 상대 좌표 (이미지 좌측 끝=0, 우측 끝=1).
+- \`anchor.y\`: 0~1 사이 상대 좌표 (이미지 상단=0, 하단=1).
+- \`anchor.note\`: 어떤 UI 요소를 가리키는지 짧은 설명 (예: "기간 셀렉트", "초대 버튼", "이메일 인풋").
+- 좌표는 해당 UI 요소의 **시각적 중심점**을 가리키도록 합니다.
+- 이미지를 직접 보고(Read 도구로) UI 요소의 화면상 위치를 측정해서 0~1 비율로 환산하세요.
+- 기능이 여러 요소를 다루면(예: 인풋+버튼) 가장 대표적인 트리거(보통 버튼)의 위치를 사용.
+- 화면 전반에 걸치거나 위치를 특정하기 어려우면 \`anchor: null\` 로 반환 (그래도 기능은 포함).
+- **위치 정확도가 중요합니다.** 대충 찍지 말고 실제 이미지 좌표를 측정해서 0~1 비율로 정밀하게 계산하세요.
+
+**테이블·스크롤 규칙 (고정)**
+- 화면에 테이블/목록(「[데이터·테이블]」, 테이블컬럼, 리스트아이템 등)이 있으면 **목록 조회/표시 기능**을 명세에 포함하세요. (컬럼 표시, 행 단위 액션 등)
+- 테이블/목록에 스크롤(「[데이터·스크롤]」)이 있고, **"한 번에 몇 개씩 불러오는지"(페이지 크기·페이지네이션) 설명이 화면·문서에 없으면 → 기본값으로 "무한 스크롤(infinite scroll)" 로 명세합니다.**
+  - FE: 목록 무한 스크롤 — **스크롤 끝 도달 감지 후 다음 페이지를 지연 로드(lazy load)**, 로딩 인디케이터 표시.
+  - BE: 커서/offset 기반 페이징 조회 API (다음 페이지 요청 처리).
+- 단, 화면에 명시적 페이지네이션(「[플로우] 페이지네이션」)이나 "N개씩 보기" 같은 개수 표기가 있으면 그 방식(페이지 기반)을 따르고 무한 스크롤로 가정하지 마세요.
+${previousFeatures.length ? `**이전 분석 누적 규칙 — 중복 생성 금지 (NEW, 매우 중요)**
+이전에 같은 파일의 다른 페이지들에서 이미 다음 기능들이 명세되었습니다. 이번 페이지에서 **동일/유사한 기능은 다시 명세하지 마세요.**
+이미 정의된 기능 목록(${previousFeatures.length}개):
+${previousFeatures.map((n, i) => `  ${i + 1}. ${n}`).join('\n')}
+
+- 위 목록과 **이름이 같거나, 동작이 실질적으로 같은 기능**(GNB 메뉴 이동, 지점 셀렉트, 설정 아이콘 이동, 프로필 메뉴, 기간 범위 선택, 기간 프리셋 전환 등 공통 요소)은 **이번 페이지의 features/unhappyFlows/edgeCases에 절대 포함하지 마세요.**
+- 이번 페이지에서 **새로 등장한 화면 고유 기능만** 명세합니다.
+- 이름이 약간 다르더라도(예: "지점 선택" vs "지점 셀렉트", "기간 선택" vs "조회 기간 선택") 같은 동작이면 중복으로 간주하고 제외하세요.
+- 모달·토스트처럼 화면 고유 UI는 누적 목록에 없어도 새로 명세 가능.
+- 결과적으로 이번 페이지에서 명세되는 항목은 "이 화면에서만 가능한 동작"으로 좁혀집니다. 항목이 적어져도 정상입니다.
+- 단, **공통 요소가 이번 화면에서 명확히 다른 동작(예: 같은 셀렉트인데 다른 값 선택 후 다른 결과)을 만든다면** 그건 새 기능으로 명세해도 됩니다 — 이때 기능명을 차별화하세요.
+
+` : ''}${hasDocs ? `**문서 참고 규칙 (PRD/요구사항이 첨부된 경우 필수)**
+- 첨부된 PRD/요구사항 문서를 **처음부터 끝까지 빠짐없이 읽고** 화면 요소와 1:1로 대조하세요. 문서에 명시된 정책·검증 규칙·에러 케이스·정상 흐름·예외 흐름·데이터 형식·필드 제약·사용자 권한·도메인 용어를 모두 반영합니다.
+- 화면에는 보이지 않지만 문서에 명시된 정책(예: 최소 비밀번호 길이, 입력 글자수 제한, 권한별 노출 차이, 에러 메시지 문구)은 **FE/BE 할일에 반드시 반영**하세요.
+- 단, 문서에만 있고 화면에 전혀 근거 요소가 없는 별도 기능은 추가하지 마세요. 문서 = 화면 요소를 더 정확히 해석하는 근거 자료.
+- 도메인 용어·정책 표현·에러 문구는 문서 표현을 그대로 사용하세요(임의 변형 금지).
+- 언해피플로우·엣지케이스 도출 시에도 문서에 명시된 예외·실패·제약 조건을 우선 근거로 삼으세요.` : ''}
+${docSection}
+
+---
+## Figma 화면 정보 (이 안에 있는 것만 기능으로 만드세요)
+${pageContext}
+
+---
+## 작성 규칙
+1. 각 기능은 화면의 특정 UI 요소(버튼·탭·인풋·텍스트 레이블 등)에서 직접 도출된 것이어야 함
+2. 기능명은 동사+목적어, 화면 텍스트를 그대로 활용 (예: 화면에 "초대" 버튼이 있으면 → "구성원 초대")
+3. FE: 해당 UI 구현·상태 관리·API 연동·유효성 검사
+4. BE: 해당 기능의 API·비즈니스 로직·DB·인증
+5. 각 할일은 40자 이내 한 줄
+6. 장식용 UI(구분선·배경·아이콘만 있는 요소)는 제외
+
+## 완전성(누락 금지) 규칙 — 매우 중요
+- 화면의 **모든 상호작용 요소를 빠짐없이** 기능으로 다루세요. 다음은 각각 최소 1개 기능에 대응되어야 합니다:
+  - 모든 [액션] 버튼 (초대·내보내기·저장 등)
+  - 모든 [데이터] 셀렉트/드롭다운 (권한 선택 등) — **입력값 선택 동작 자체도 별도 기능이 될 수 있음**
+  - 모든 입력필드 + 버튼 조합 (이메일 입력 + 초대)
+  - 테이블/목록 (목록 조회·스크롤)
+  - 비활성(읽기 전용) 필드 (조회/표시로 언급)
+  - 모달·토스트 (있을 때)
+- 여러 요소를 임의로 하나의 기능에 뭉뚱그려 **다른 요소를 누락시키지 마세요.** 동작이 다르면 분리합니다.
+- **출력 직전 자가 점검(필수):** 위 목록의 각 요소가 features에 최소 1번 등장하는지 확인하고, 빠진 게 있으면 반드시 추가한 뒤 출력하세요. (점검 과정은 출력하지 말 것 — 결과 JSON만)
+
+## 레이블 없는 버튼 처리 (중요)
+- 버튼·요소의 레이어 이름이 "Rectangle 1234" 처럼 의미 없어도, **[텍스트] 섹션의 도메인 단어**로 기능을 추론하세요.
+- 화면에 "구성원", "초대", "이메일", "권한", "소유자/관리자" 같은 텍스트가 있으면 그것이 곧 기능의 근거입니다.
+- 레이블이 비어 있다는 이유로 분석을 포기하지 마세요. **[텍스트]에 보이는 도메인 언어 = 화면에 실재하는 기능**입니다.
+
+${mode === 'spec' ? `## 모드 — 기능 명세 생성 (mode=spec)
+이번 분석은 **정상 기능(features)만** 도출합니다. 예외/오류/엣지 케이스는 별도 탭에서 다루므로 이번 응답에는 포함하지 마세요. \`overview\`와 \`features\`만 채우세요.` : `## 모드 — 예외 케이스 생성 (mode=exception)
+이번 분석은 **디자이너가 만들 예외 페이지 목록**을 정리하는 작업입니다. 일반 features·overview는 이번 응답에 포함하지 마세요.
+요청된 대분류 (체크된 것만 채우세요):
+${wantEdge ? '- ✅ 엣지케이스(edgeCases): 극단값·콘텐츠 양·미디어·날짜/시간 등 정상 범위의 극한 상황' : '- ❌ 엣지케이스 생성 안 함'}
+${wantError ? '- ✅ 에러케이스(errorCases): 데이터/에러/권한/프로세스/콘텐츠 상태 등 실패·상태 처리 페이지' : '- ❌ 에러케이스 생성 안 함'}
+
+## 디자이너용 작성 방식 — 반드시 지킬 것
+- 대분류는 반드시 \`edgeCases\`, \`errorCases\` 로만 나눕니다.
+- 중분류는 아래 1~10 번호 중 하나를 반드시 넣습니다.
+- 각 항목은 디자이너가 바로 페이지/상태를 만들 수 있게 **2~3줄 이내 핵심만** 작성합니다.
+- 너무 짧아질 경우 \`problem\`(현재 문제)과 \`design\`(제작해야 할 페이지 핵심 구성요소)을 분리해서 작성합니다.
+- \`priority\`는 반드시 \`필수\`, \`권장\`, \`선택\` 중 하나입니다. UI에서 뱃지로 표시됩니다.
+- \`components\`에는 필요한 컴포넌트나 디자인 요소를 짧게 적습니다. 예: "스켈레톤, 재시도 버튼, 토스트", "Empty State, CTA 버튼".
+- \`problem\`, \`design\`, \`components\`는 플러그인 내부에 표시되는 **디자이너 관점** 문장입니다. 여기에는 BE/API 구현 설명을 쓰지 마세요.
+- \`devTitle\`, \`fe\`, \`be\`는 Figma 캔버스에 표시되는 **개발자 관점** 문장입니다. 첨부 이미지의 분류처럼 "에러 케이스 = 시스템이 잘못된 상태", "엣지 케이스 = 정상 범위의 경계 상황"을 구분해 타이틀을 작성하세요.
+- 캔버스용 \`fe\`는 사용자가 보게 되는 UI 처리, 상태 컴포넌트, 인터랙션 방어 로직 중심으로 작성하세요.
+- 캔버스용 \`be\`는 API 응답, 검증, 권한, 상태 코드, 재시도/캐시/락 정책 중심으로 작성하세요.
+- 화면/문서에 직접 관련 없는 항목은 줄이고, 관련도가 높은 항목을 우선합니다.
+
+## 중분류 체크리스트
+### 에러케이스(errorCases) 우선 범위
+1. 데이터 상태 — 로딩, 데이터 없음, 검색 결과 없음, 필터 적용
+2. 에러 / 장애 상태 — 전체 페이지 에러, 데이터 로딩 실패, 폼 입력 에러, 액션 실패, 네트워크 끊김
+3. 권한 / 접근 상태 — 비로그인, 권한 없음, 플랜 제한, 세션 만료
+4. 프로세스 상태 — 처리 중, 성공, 비활성화, 변경 사항 있음
+5. 콘텐츠 특수 상태 — 삭제됨, 읽기 전용, 종료됨, 첫 방문/온보딩, 점검 중
+
+### 엣지케이스(edgeCases) 우선 범위
+6. 텍스트 극단값 — 긴 텍스트, 미입력, 줄바꿈 없는 단어, 특수문자/이모지
+7. 숫자 극단값 — 큰 숫자, 금액/자릿수 초과, 0/음수, 0%/100%
+8. 리스트 / 콘텐츠 양 극단값 — 1개, 매우 많음, 중첩 깊이, 테이블 컬럼 초과
+9. 미디어 극단값 — 이미지 없음, 로딩 실패, 비율 불일치, 파일 용량/형식 초과
+10. 날짜 / 시간 극단값 — 상대/절대 시간, 날짜 범위 역전, 타임존/로케일
+
+## 항목 JSON 형식
+\`{
+  "feature": "디자이너가 만들 페이지/상태 이름",
+  "categoryNo": 1,
+  "categoryTitle": "데이터 상태",
+  "priority": "필수",
+  "problem": "현재 문제를 1문장으로",
+  "design": "제작해야 할 화면 처리와 핵심 구성요소를 1~2문장으로",
+  "components": "필요 컴포넌트/디자인 요소",
+  "devTitle": "개발자 관점 예외 타이틀",
+  "fe": "FE 구현 할일",
+  "be": "BE 구현 할일",
+  "icon": "관련 이모지 1개",
+  "anchor": null
+}\`
+
+## 개수
+${wantError ? '- errorCases: 화면과 문서에 맞는 항목 5~10개. 중분류 1~5를 우선 커버.' : ''}
+${wantEdge ? '- edgeCases: 화면과 문서에 맞는 항목 5~10개. 중분류 6~10을 우선 커버.' : ''}
+중요도가 낮은 항목은 \`선택\`으로 두고, 화면 제작에 반드시 필요한 항목은 \`필수\`로 지정하세요.`}
+
+## 출력 형식 — 매우 중요 (반드시 지킬 것)
+- **JSON 객체 단 하나만 출력합니다.** 설명·머리말·분석·요약·마크다운·코드펜스 절대 금지.
+- 응답의 **첫 글자는 반드시 \`{\` 이고 마지막 글자는 \`}\`** 여야 합니다.
+- ${mode === 'spec' ? '객체는 \`overview\`(화면 설명)와 \`features\`(기능 배열) **두 키만** 가집니다. \`edgeCases\`/\`errorCases\` 키는 포함하지 마세요.' : '객체는 요청된 예외 케이스 키만 가집니다 (' + [wantEdge && '`edgeCases`', wantError && '`errorCases`'].filter(Boolean).join(', ') + '). 그 외 키(features/overview/cornerCases 등)는 포함하지 마세요.'}
+- \`overview.title\`: 이 화면의 이름 (예: "회사 구성원 관리").
+- \`overview.purpose\`: 이 화면이 **무엇을 하는 화면인지** 1~2문장으로 설명. 사용자가 이 화면에서 무엇을 할 수 있는지 중심.
+- "정보가 부족하다", "확인된 요소" 같은 메타 설명을 절대 쓰지 마세요.
+- [텍스트]·[액션]·[데이터] 또는 이미지에 "초대", "권한", "구성원", "이메일", "소유자/관리자/일반회원", "내보내기", "해제" 같은 도메인·액션 단어가 하나라도 있으면 **반드시 해당 기능을 1개 이상 도출**해야 합니다. \`features\`가 빈 배열이면 오답입니다.
+- 입력필드(예: 이메일) + 액션 버튼(예: 초대)의 조합이 보이면 그것은 명백한 기능입니다. 절대 누락하지 마세요.
+
+${mode === 'spec' ? `형식 예시 (이 구조의 JSON만 출력):
+{
+  "overview": {
+    "title": "화면 이름 (예: 회사 구성원 관리)",
+    "purpose": "이 화면이 무엇을 하는 화면인지 1~2문장 설명"
+  },
+  "features": [
+    {
+      "feature": "기능명 (동사+목적어, 화면 텍스트 기반)",
+      "icon": "관련 이모지 1개",
+      "fe": "FE 구현 할일 (40자 이내)",
+      "be": "BE 구현 할일 (40자 이내)",
+      "anchor": { "x": 0.42, "y": 0.18, "note": "기간 셀렉트" },
+      "docLink": { "label": "Toast 상세 명세", "url": "https://github.com/.../toast-notification.md" }
+    }
+  ]
+}
+
+- \`anchor\` 키는 features의 모든 항목에 반드시 포함 (위치 특정 불가 시 \`null\`).
+- \`anchor.x\`, \`anchor.y\`는 0~1 사이 실수.
+- \`docLink\`는 해당 기능의 컴포넌트가 디자인시스템에 GitHub 링크를 가진 경우에만 포함 (옵션).
+- features 최소 5개 이상 (화면이 매우 단순하면 3개 이상).` : `형식 예시 (이 구조의 JSON만 출력 — 요청 안 된 키는 포함하지 마세요):
+{
+${wantEdge ? `  "edgeCases": [
+    {
+      "feature": "긴 텍스트 말줄임 상태",
+      "categoryNo": 6,
+      "categoryTitle": "텍스트 극단값",
+      "priority": "필수",
+      "icon": "🧩",
+      "problem": "상품명·닉네임·제목이 길어 카드나 테이블 셀을 밀어낼 수 있습니다.",
+      "design": "1줄 말줄임, 전체 텍스트 툴팁, 모바일 줄바꿈 정책을 함께 제작합니다.",
+      "components": "텍스트 셀, 툴팁, 말줄임 스타일",
+      "devTitle": "텍스트 길이 경계값 처리",
+      "fe": "말줄임·툴팁·줄바꿈 정책 적용",
+      "be": "최대 길이 검증 및 원문 응답 보장",
+      "anchor": null
+    },
+    {
+      "feature": "이미지 없음 상태",
+      "categoryNo": 9,
+      "categoryTitle": "미디어 극단값",
+      "priority": "권장",
+      "icon": "🧩",
+      "problem": "프로필·상품·썸네일 이미지가 없으면 빈 영역처럼 보일 수 있습니다.",
+      "design": "이니셜 아바타나 기본 플레이스홀더, 대체 아이콘을 제작합니다.",
+      "components": "Avatar, 이미지 플레이스홀더",
+      "devTitle": "이미지 없음 폴백 처리",
+      "fe": "기본 이미지·이니셜 아바타로 대체",
+      "be": "이미지 URL null/404 상태 구분 반환",
+      "anchor": null
+    }
+  ]${wantError ? ',' : ''}` : ''}
+${wantError ? `  "errorCases": [
+    {
+      "feature": "데이터 없음 상태",
+      "categoryNo": 1,
+      "categoryTitle": "데이터 상태",
+      "priority": "필수",
+      "icon": "⚠️",
+      "problem": "조회는 성공했지만 결과가 0건이면 사용자가 다음 행동을 알기 어렵습니다.",
+      "design": "빈 상태 문구, 원인 안내, 첫 액션 CTA를 한 화면 상태로 제작합니다.",
+      "components": "Empty State, CTA 버튼",
+      "devTitle": "빈 결과 상태 처리",
+      "fe": "Empty State와 CTA 표시",
+      "be": "0건 응답과 필터 조건 메타 반환",
+      "anchor": null
+    },
+    {
+      "feature": "폼 입력 에러 상태",
+      "categoryNo": 2,
+      "categoryTitle": "에러 / 장애 상태",
+      "priority": "필수",
+      "icon": "⚠️",
+      "problem": "입력값이 틀렸을 때 어느 필드가 왜 틀렸는지 바로 알아야 합니다.",
+      "design": "필드 하단 에러 텍스트, 빨간 border, 저장 버튼 상태를 함께 제작합니다.",
+      "components": "Input, Form Error, Button",
+      "devTitle": "폼 입력 검증 실패 처리",
+      "fe": "필드별 에러와 버튼 상태 갱신",
+      "be": "검증 실패 사유와 필드 키 반환",
+      "anchor": null
+    }
+  ]` : ''}
+}
+
+- \`anchor\` 키는 모든 항목에 반드시 포함 (위치 특정 불가 시 \`null\`).
+- \`anchor.x\`, \`anchor.y\`는 0~1 사이 실수.
+- \`priority\`는 반드시 "필수" / "권장" / "선택" 중 하나.
+- \`categoryNo\`는 반드시 1~10 숫자.
+- \`problem\`, \`design\`은 각각 1~2문장 이내.
+- 각 항목에는 \`devTitle\`, \`fe\`, \`be\`를 반드시 포함하세요. 플러그인 내부는 \`problem/design/components\`를, 캔버스는 \`devTitle/fe/be\`를 사용합니다.`}`;
+}
+
+// ── 응답에서 JSON 객체/배열만 안전 추출 (코드펜스·앞뒤 산문·문자열 내 괄호 대응) ──
+function extractJson(raw) {
+  let text = String(raw || '').trim();
+  // 마크다운 코드펜스 제거
+  text = text.replace(/```json/gi, '').replace(/```/g, '').trim();
+
+  // 객체({) 또는 배열([) 중 먼저 나오는 것을 시작점으로
+  const oi = text.indexOf('{');
+  const ai = text.indexOf('[');
+  let start = -1, open = '{', close = '}';
+  if (oi !== -1 && (ai === -1 || oi < ai)) { start = oi; open = '{'; close = '}'; }
+  else if (ai !== -1) { start = ai; open = '['; close = ']'; }
+  if (start === -1) return null;
+
+  // 시작 괄호부터 균형 잡힌 닫는 괄호까지 스캔 (문자열 내부 괄호 무시)
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === '\\') esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === open) depth++;
+    else if (ch === close) {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null; // 닫는 괄호를 못 찾음
+}
+
+// ── Claude Code CLI 호출 ──
+function callClaudeCLI(prompt, retriedAfterMissingCli = false) {
+  return new Promise((resolve, reject) => {
+    const claudePath = getClaudeCLI(retriedAfterMissingCli);
+    if (!claudePath) {
+      reject(new Error('Claude Code CLI를 찾을 수 없습니다. Claude Desktop을 실행하거나 Claude Code를 다시 설치해주세요.'));
+      return;
+    }
+
+    const proc = spawn(claudePath, [
+      '--print',
+      '--output-format', 'text',
+      '--model', MODEL,
+      '--allowedTools', 'Read',
+    ], {
+      env: { ...process.env },
+      cwd: __dirname, // 루트('/') 대신 figma 폴더로 고정 — 네트워크 볼륨·구글드라이브 스캔 방지
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    // 직접 타임아웃 관리 (SIGTERM 143 대신 명확한 메시지)
+    let settled = false;
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { proc.kill('SIGTERM'); } catch (e) { /* */ }
+    }, 240000);
+
+    proc.once('spawn', () => {
+      proc.stdin.write(prompt, 'utf8');
+      proc.stdin.end();
+    });
+
+    proc.stdin.on('error', () => { /* spawn 실패 시 error 이벤트에서 처리 */ });
+
+    let stdout = '';
+    let stderr = '';
+
+    proc.stdout.on('data', d => { stdout += d; });
+    proc.stderr.on('data', d => { stderr += d; });
+
+    proc.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (timedOut) {
+        reject(new Error('Claude 응답 시간 초과(240초). 화면이 매우 복잡하거나 CLI가 느립니다. 잠시 후 다시 시도하세요.'));
+        return;
+      }
+      if (code !== 0) {
+        const msg = stderr.trim() || stdout.trim();
+        if (msg.includes('Not logged in') || msg.includes('login')) {
+          reject(new Error('Claude Code CLI 로그인 필요 — 터미널에서 claude /login 실행 후 재시도하세요.'));
+        } else {
+          reject(new Error(msg || `claude 프로세스 종료 코드: ${code}`));
+        }
+      } else {
+        resolve(stdout.trim());
+      }
+    });
+
+    proc.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+
+      if (err.code === 'ENOENT' && !retriedAfterMissingCli) {
+        cachedClaudePath = null;
+        callClaudeCLI(prompt, true).then(resolve, reject);
+        return;
+      }
+
+      reject(new Error(`CLI 실행 실패: ${err.message}`));
+    });
+  });
+}
+
+// ── HTTP 서버 ──
+const server = http.createServer(async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+
+  if (req.method === 'GET' && req.url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, cli: getClaudeCLI() }));
+    return;
+  }
+
+  // 컴포넌트 → md 명세 생성 (toast-notification.md 형식)
+  if (req.method === 'POST' && req.url === '/extract-component-md') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { component, image, githubBase } = JSON.parse(body);
+        if (!component || !component.name) throw new Error('컴포넌트 정보가 없습니다.');
+
+        const imgDir = path.join(__dirname, 'logs');
+        let imgPath = null;
+        if (image) {
+          imgPath = path.join(imgDir, 'component-input.png');
+          try { fs.writeFileSync(imgPath, Buffer.from(image, 'base64')); } catch (e) { imgPath = null; }
+        }
+
+        // 템플릿 로드 (toast-notification.md 사용)
+        const designDir = path.join(__dirname, 'design-system');
+        const templatePath = path.join(designDir, 'toast-notification.md');
+        let template = '';
+        try { template = fs.readFileSync(templatePath, 'utf8'); } catch (e) { template = ''; }
+
+        const variantText = component.variantProperties
+          ? JSON.stringify(component.variantProperties, null, 2)
+          : '(없음)';
+        const variantInstancesText = (component.variantInstances || [])
+          .slice(0, 30)
+          .map(v => `- ${v.name} (${v.width}x${v.height})${v.variantProperties ? ' · ' + JSON.stringify(v.variantProperties) : ''}`)
+          .join('\n') || '(없음)';
+        const layersText = (component.layers || [])
+          .slice(0, 60)
+          .map(l => `${'  '.repeat(l.depth)}- ${l.type} "${l.name}" ${l.width}x${l.height}`)
+          .join('\n');
+        const textsText = (component.texts || []).slice(0, 40).join(' / ') || '(없음)';
+
+        const prompt = `당신은 시니어 디자인 시스템 작성자입니다.
+선택된 Figma 컴포넌트를 분석해서 **아래 템플릿과 동일한 구조**의 마크다운 명세 파일을 작성하세요.
+
+## 입력 — 선택된 컴포넌트
+
+- **이름**: ${component.name}
+- **프로젝트명**: ${component.projectName || '(unknown)'}
+- **페이지명**: ${component.pageName || '(unknown)'}
+- **타입**: ${component.type}
+- **크기**: ${Math.round(component.width||0)}x${Math.round(component.height||0)}
+- **Variant 정의 (COMPONENT_SET의 경우)**:
+\`\`\`json
+${variantText}
+\`\`\`
+- **Variant 인스턴스 목록**:
+${variantInstancesText}
+- **수집된 텍스트(라벨/문구)**: ${textsText}
+- **레이어 구조 (앞 60개)**:
+\`\`\`
+${layersText}
+\`\`\`
+${imgPath ? `- **컴포넌트 스크린샷 (반드시 Read 도구로 직접 열어보고 분석)**: @${imgPath}` : ''}
+
+## 템플릿 (이 구조를 그대로 따를 것)
+
+\`\`\`md
+${template || '(템플릿 없음 — 직접 toast-notification.md 형식 따를 것)'}
+\`\`\`
+
+## 작성 규칙
+- 위 템플릿의 **섹션 순서·헤딩·표 컬럼·blockquote 형식을 그대로** 따르세요.
+- 비어 있는 필드는 합리적인 디폴트로 채우거나 \`(검토 필요)\` 마커.
+- Variant·토큰·문구는 위 입력 데이터(수집된 텍스트·variantProperties)에 기반해 채우고, 데이터가 부족한 부분은 **이미지를 보고** 추론합니다.
+- Owner는 \`Design System Team\`, Status는 \`Draft\`, Last updated는 오늘 날짜로.
+- Figma 링크: \`figma://link/REPLACE_WITH_NODE_ID\` 그대로.
+- 디자인 토큰 이름은 컴포넌트명을 prefix로 사용 (예: 컴포넌트가 "Button"이면 \`color.button.primary.background\`).
+- Changelog 첫 entry는 오늘 날짜, 초안 작성으로.
+
+## 출력 형식 (JSON 객체 1개만 — 다른 텍스트 절대 금지)
+첫 글자 \`{\`, 마지막 글자 \`}\`. 코드펜스 금지.
+{
+  "filename": "component-slug.md",
+  "componentName": "Component Display Name",
+  "markdown": "# Component\\n\\n## 1. Overview\\n..."
+}
+
+- \`filename\`: 영문 소문자 + 하이픈, .md 확장자. 컴포넌트명을 기반으로 (예 "Button" → "button.md", "Toast Notification" → "toast-notification.md", "버튼" → "button.md").
+- \`componentName\`: 원래 컴포넌트명 그대로 (한글 OK).
+- \`markdown\`: 템플릿 구조 전체 — H1부터 마지막 Related 섹션까지 완전한 본문. 줄바꿈은 \\n 으로 이스케이프.`;
+
+        // 디버그 덤프
+        try { fs.writeFileSync(path.join(imgDir, 'last-component-prompt.txt'), prompt); } catch (de) { /* */ }
+
+        const raw = await callClaudeCLI(prompt);
+        try { fs.writeFileSync(path.join(imgDir, 'last-component-response.txt'), String(raw || '')); } catch (de) { /* */ }
+
+        const jsonStr = extractJson(raw);
+        if (!jsonStr) throw new Error('응답에서 JSON을 찾을 수 없습니다. 응답 일부: ' + String(raw).slice(0, 200));
+        const parsed = JSON.parse(jsonStr);
+        let filename = String(parsed.filename || '').trim();
+        const componentName = String(parsed.componentName || component.name || '').trim();
+        const markdown = String(parsed.markdown || '');
+
+        // filename 안전화 — 프로젝트명 scope를 붙여 다른 프로젝트의 동일 컴포넌트명 충돌 방지
+        const projectName = String(component.projectName || component.fileName || component.pageName || 'figma-project').trim();
+        filename = componentScopedFilename(projectName, filename, componentName, component.fileKey);
+
+        // design-system/ 폴더에 저장 (없으면 생성)
+        if (!fs.existsSync(designDir)) fs.mkdirSync(designDir, { recursive: true });
+        const outPath = path.join(designDir, filename);
+        fs.writeFileSync(outPath, markdown, 'utf8');
+
+        // GitHub URL 계산 — 기본 저장소는 hy0909/designsystem
+        const requestedBase = String(githubBase || '').replace(/\/+$/, '');
+        const base = (!requestedBase || /PLACEHOLDER_OWNER|PLACEHOLDER_REPO/.test(requestedBase))
+          ? COMPONENT_GITHUB_BASE
+          : requestedBase;
+        const githubUrl = base ? `${base}/design-system/${filename}` : null;
+
+        let githubPublish = { attempted: true, committed: false, pushed: false };
+        let githubPublishError = null;
+        try {
+          githubPublish = Object.assign(
+            { attempted: true },
+            publishComponentMdToGithub(filename, markdown, componentName)
+          );
+        } catch (pe) {
+          githubPublishError = pe && pe.message ? pe.message : String(pe);
+          console.error('[컴포넌트 MD GitHub 푸시 실패]', githubPublishError);
+        }
+
+        // 디자인시스템.md 에 새 컴포넌트 섹션 자동 추가 (이미 같은 파일 링크가 있으면 skip)
+        let designSystemUpdated = false;
+        try {
+          const dsPath = path.join(__dirname, '디자인시스템.md');
+          if (fs.existsSync(dsPath)) {
+            const ds = fs.readFileSync(dsPath, 'utf8');
+            if (!ds.includes('design-system/' + filename)) {
+              const block = `\n\n## ${componentName}\n\n- **상세 명세 (GitHub)**: [${componentName} 상세 명세](${githubUrl || 'https://github.com/PLACEHOLDER_OWNER/PLACEHOLDER_REPO/blob/main/design-system/' + filename})\n  - 로컬 사본: [design-system/${filename}](design-system/${filename})\n- _(자동 생성 — 디자인시스템.md의 일관성을 위해 항목 직접 보강 권장)_\n`;
+              fs.appendFileSync(dsPath, block, 'utf8');
+              designSystemUpdated = true;
+            }
+          }
+        } catch (de) { /* skip */ }
+
+        console.log(`[컴포넌트 MD] ${filename} 저장 · 디자인시스템.md ${designSystemUpdated ? '갱신' : '건너뜀'} · GitHub ${githubPublish.pushed ? '푸시 완료' : (githubPublishError ? '푸시 실패' : '변경 없음')}`);
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          filename,
+          componentName,
+          markdown,
+          githubUrl,
+          absolutePath: outPath,
+          designSystemUpdated,
+          githubPublish,
+          githubPublishError,
+        }));
+      } catch (e) {
+        console.error('[컴포넌트 MD 오류]', e.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/make-exception-page') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { prdContent, reqContent } = JSON.parse(body || '{}');
+        const designSystem = loadDesignSystem();
+        const prompt = `당신은 시니어 UX 기획자이자 디자인시스템 설계자입니다.
+PRD/요구사항 문서와 디자인시스템을 바탕으로 Figma에 그릴 "예외 케이스 페이지" 구성을 만드세요.
+
+## PRD
+${prdContent || '(첨부 없음)'}
+
+## 요구사항정의서
+${reqContent || '(첨부 없음)'}
+
+## 디자인시스템
+${designSystem || '(디자인시스템 문서 없음)'}
+
+## 작성 규칙
+- 실제 제품 페이지에 들어갈 수 있는 예외 케이스 화면/상태를 구성하세요.
+- 로그인/권한/입력검증/네트워크/빈 상태/서버 오류/업로드/결제/삭제 확인 등 문서에 맞는 케이스를 우선하세요.
+- 디자인시스템에 있는 컴포넌트 이름이나 패턴이 보이면 component 필드에 반영하세요.
+- 너무 많지 않게 섹션 3~5개, 각 섹션 item 2~4개로 구성하세요.
+- 문서가 없으면 범용 SaaS/관리자 화면 기준으로 작성하세요.
+
+## 출력 형식
+JSON 객체 1개만 출력하세요. 코드펜스 금지.
+{
+  "page": {
+    "title": "예외 케이스",
+    "subtitle": "PRD와 디자인시스템 기반 예외 상태 페이지",
+    "sections": [
+      {
+        "title": "입력 검증",
+        "description": "폼 입력에서 발생하는 오류 상태",
+        "items": [
+          {
+            "name": "필수값 누락",
+            "trigger": "필수 입력값 없이 저장 버튼 클릭",
+            "expected": "필드 하단 에러 메시지와 토스트를 표시",
+            "component": "Input, Toast"
+          }
+        ]
+      }
+    ]
+  }
+}`;
+
+        const raw = await callClaudeCLI(prompt);
+        const jsonStr = extractJson(raw);
+        if (!jsonStr) throw new Error('응답에서 JSON을 찾을 수 없습니다. 응답 일부: ' + String(raw).slice(0, 200));
+        const parsed = JSON.parse(jsonStr);
+        const page = parsed.page || parsed;
+        page.title = page.title || '예외 케이스';
+        page.subtitle = page.subtitle || 'PRD와 디자인시스템 기반 예외 상태 페이지';
+        page.sections = Array.isArray(page.sections) ? page.sections : [];
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ page }));
+      } catch (e) {
+        console.error('[예외 페이지 제작 오류]', e.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
+  // IA 이미지에서 leaf 페이지 타이틀 추출
+  if (req.method === 'POST' && req.url === '/extract-ia') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { image } = JSON.parse(body);
+        if (!image) throw new Error('이미지가 없습니다.');
+        const imgDir = path.join(__dirname, 'logs');
+        const imgPath = path.join(imgDir, 'ia-input.png');
+        fs.writeFileSync(imgPath, Buffer.from(image, 'base64'));
+        console.log(`[IA] 이미지 저장: ${imgPath}`);
+
+        const prompt = `당신은 UX 정보 설계(IA) 분석 전문가입니다.
+아래 IA(Information Architecture, 사이트맵·메뉴 트리·정보 구조도) 이미지를 분석해서 **모든 페이지를 계층 구조(트리)** 로 추출하세요.
+
+## 화면 이미지 (Read 도구로 직접 열어볼 것)
+@${imgPath}
+
+## 규칙
+- **모든 페이지/카테고리**를 노드로 추출 — 카테고리 헤더도 노드로 포함합니다(자식 페이지를 가지므로).
+- **계층 보존(중요)**: IA의 트리 구조를 그대로 반영. 각 노드에 \`parentId\`로 상위 노드를 참조 (최상위는 null).
+- **ID 부여**: 노드마다 \`p0, p1, p2 ...\` 식의 고유 id (parentId 참조에 사용).
+- **순서 보존**: 같은 부모를 가진 형제 노드들은 IA에서 위→아래(또는 좌→우)로 나타난 순서대로.
+- **이미지의 글자 그대로**: 임의 변형·축약·번역 금지. 한글은 한글, 영문은 영문 그대로.
+- **subtitle**: 부모 노드의 title을 그대로 (root는 빈 문자열). 화면별 컴포넌트 헤더의 보조 텍스트로 사용됨.
+- **중복**: 같은 위치에 같은 이름이 여러 번 나오면 한 번만. 다른 위치(다른 부모 밑)에 같은 이름이면 별개 노드.
+
+## 출력 형식 (JSON 객체 단 하나만)
+첫 글자는 \`{\`, 마지막 글자는 \`}\`. 산문·코드펜스·머리말 금지.
+{
+  "pages": [
+    { "id": "p0", "title": "로그인",     "parentId": null, "subtitle": "" },
+    { "id": "p1", "title": "회원가입",   "parentId": "p0", "subtitle": "로그인" },
+    { "id": "p2", "title": "홈",         "parentId": "p0", "subtitle": "로그인" },
+    { "id": "p3", "title": "마이페이지", "parentId": "p2", "subtitle": "홈" }
+  ]
+}
+
+빈 배열이면 오답. 이미지에 보이는 모든 페이지를 빠짐없이, 그리고 계층 관계를 정확히 반영해서 포함하세요.`;
+
+        // 디버그 덤프
+        try {
+          fs.writeFileSync(path.join(imgDir, 'last-ia-prompt.txt'), prompt);
+        } catch (de) { /* */ }
+
+        const raw = await callClaudeCLI(prompt);
+        try {
+          fs.writeFileSync(path.join(imgDir, 'last-ia-response.txt'), String(raw || ''));
+        } catch (de) { /* */ }
+        const jsonStr = extractJson(raw);
+        if (!jsonStr) throw new Error('응답에서 JSON을 찾을 수 없습니다. 응답 일부: ' + String(raw).slice(0, 200));
+        const parsed = JSON.parse(jsonStr);
+        let pages = Array.isArray(parsed.pages) ? parsed.pages : [];
+        // 청소
+        pages = pages
+          .map((p, idx) => ({
+            id: String(p.id || ('p' + idx)),
+            title: String(p.title || '').trim(),
+            parentId: p.parentId == null ? null : String(p.parentId),
+            subtitle: String(p.subtitle || '').trim(),
+          }))
+          .filter(p => p.title.length > 0 && p.title.length < 200);
+
+        // 구버전 호환: 옛 응답 형식(pageTitles)이 오면 평탄한 root 노드들로 변환
+        if (pages.length === 0 && Array.isArray(parsed.pageTitles)) {
+          pages = parsed.pageTitles
+            .map(t => String(t || '').trim())
+            .filter(t => t.length > 0)
+            .map((title, idx) => ({ id: 'p' + idx, title, parentId: null, subtitle: '' }));
+        }
+
+        // 백워드 호환 pageTitles도 함께 반환 (구버전 클라이언트용)
+        const pageTitles = pages.map(p => p.title);
+        const rootCount = pages.filter(p => !p.parentId).length;
+        console.log(`[IA 완료] ${pages.length}개 노드 추출 (root ${rootCount}개)`);
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ pages, pageTitles }));
+      } catch (e) {
+        console.error('[IA 오류]', e.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/analyze') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const {
+          frameData, prdContent, reqContent, previousFeatures, includeCommon,
+          mode, requestEdge, requestError, requestCorner,
+        } = JSON.parse(body);
+
+        let docSection = '';
+        // 문서 한도 확대 — 첨부 시 끝까지 모두 반영(과도한 잘림 방지). 매우 큰 문서는 30000자 컷.
+        if (prdContent) docSection += `\n\n[PRD 문서 — 처음부터 끝까지 모두 읽고 화면 요소와 대조해 반영하세요]\n${prdContent.slice(0, 30000)}`;
+        if (reqContent) docSection += `\n\n[요구사항정의서 — 처음부터 끝까지 모두 읽고 화면 요소와 대조해 반영하세요]\n${reqContent.slice(0, 30000)}`;
+        const hasDocs = !!(prdContent || reqContent);
+
+        const prevCount = Array.isArray(previousFeatures) ? previousFeatures.length : 0;
+        const effMode = (mode === 'exception') ? 'exception' : 'spec';
+        const reqFlags = { edge: !!requestEdge, error: !!requestError };
+        console.log(`[분석 요청] mode=${effMode} | 프레임 ${frameData.length}개 | 문서: ${hasDocs ? '있음' : '없음'} | 누적: ${prevCount} | 공통기능: ${includeCommon ? 'ON' : 'OFF'}${effMode === 'exception' ? ' | exc: edge=' + reqFlags.edge + ' err=' + reqFlags.error : ''}`);
+
+        // ── 화면 이미지 저장 (비전 분석용) ──
+        const imgDir = path.join(__dirname, 'logs');
+        const imagePaths = [];
+        frameData.forEach((f, i) => {
+          if (f.image) {
+            try {
+              const p = path.join(imgDir, `frame-${i}.png`);
+              fs.writeFileSync(p, Buffer.from(f.image, 'base64'));
+              imagePaths.push(p);
+              f._imagePath = p;
+            } catch (ie) { /* 무시 */ }
+          }
+          delete f.image; // 프롬프트/덤프에 거대한 base64가 들어가지 않도록 제거
+        });
+        console.log(`[이미지] ${imagePaths.length}개 저장`);
+
+        const prompt = buildPrompt(frameData, docSection, hasDocs, imagePaths, previousFeatures || [], !!includeCommon, effMode, reqFlags);
+
+        // 디버그 덤프 — 무엇을 읽었고 무엇을 받았는지 추적
+        try {
+          const dbgDir = path.join(__dirname, 'logs');
+          fs.writeFileSync(path.join(dbgDir, 'last-framedata.json'), JSON.stringify(frameData, null, 2));
+          fs.writeFileSync(path.join(dbgDir, 'last-prompt.txt'), prompt);
+        } catch (de) { /* 무시 */ }
+
+        const raw = await callClaudeCLI(prompt);
+
+        try {
+          fs.writeFileSync(path.join(__dirname, 'logs', 'last-response.txt'), String(raw || ''));
+        } catch (de) { /* 무시 */ }
+
+        const jsonStr = extractJson(raw);
+        if (!jsonStr) {
+          throw new Error('응답에서 JSON을 찾을 수 없습니다. 응답 일부: ' + raw.slice(0, 200));
+        }
+
+        let parsed;
+        try {
+          parsed = JSON.parse(jsonStr);
+        } catch (pe) {
+          throw new Error('JSON 파싱 실패: ' + pe.message + ' | 추출된 내용: ' + jsonStr.slice(0, 200));
+        }
+
+        // 모드별 응답 키 추출
+        let features = [], overview = null, edgeCases = [], errorCases = [];
+        if (Array.isArray(parsed)) {
+          features = parsed;
+        } else {
+          features = Array.isArray(parsed.features) ? parsed.features : [];
+          overview = parsed.overview || null;
+          edgeCases = Array.isArray(parsed.edgeCases) ? parsed.edgeCases : [];
+          errorCases = Array.isArray(parsed.errorCases)
+            ? parsed.errorCases
+            : (Array.isArray(parsed.unhappyFlows) ? parsed.unhappyFlows : []);
+          // 구버전 호환: cornerCases가 오면 모두 tag="복잡/희귀" 부여하고 edgeCases에 합침
+          if (Array.isArray(parsed.cornerCases) && parsed.cornerCases.length) {
+            const tagged = parsed.cornerCases.map(it => Object.assign({}, it, { tag: '복잡/희귀' }));
+            edgeCases = edgeCases.concat(tagged);
+          }
+        }
+        const cornerCount = edgeCases.filter(it => it && it.tag === '복잡/희귀').length;
+        console.log(`[완료] mode=${effMode} · features ${features.length} · edge ${edgeCases.length}(복잡/희귀 ${cornerCount}) · error ${errorCases.length}${overview ? ' | overview' : ''}`);
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        // 생성 환경 메타 — 명세 하단에 "어떤 모델·환경에서 생성했는지" 기록용
+        const now = new Date();
+        const pad = n => String(n).padStart(2, '0');
+        const meta = {
+          model: MODEL,
+          tool: 'Claude Code CLI (기능 명세 생성기)',
+          os: `${process.platform} ${os.release()} (${process.arch})`,
+          node: process.version,
+          generatedAt: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`,
+        };
+
+        res.end(JSON.stringify({ features, overview, edgeCases, errorCases, meta }));
+      } catch (e) {
+        console.error('[오류]', e.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
+  res.writeHead(404);
+  res.end();
+});
+
+server.listen(PORT, '127.0.0.1', () => {
+  console.log(`✅ 기능 명세 브릿지 서버 실행 중 — http://localhost:${PORT}`);
+  console.log('   Claude Code 로그인 세션을 사용합니다. (별도 API 키 불필요)');
+  console.log('   Figma 플러그인에서 기능 생성 버튼을 눌러주세요.');
+});
