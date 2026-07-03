@@ -467,6 +467,43 @@ function hasRoundedCorner(node, min) {
   return false;
 }
 
+function addContextNote(result, source, text) {
+  text = String(text || '').trim().replace(/\s+/g, ' ');
+  if (!text || text.length < 2) return;
+  if (text.length > 500) text = text.slice(0, 500) + '...';
+  result.contextNotes.add(source ? `${source}: ${text}` : text);
+}
+
+function collectNodeContextNotes(node, result) {
+  const lname = String(node.name || '').toLowerCase();
+  const noteName = /comment|annotation|note|memo|주석|코멘트|설명|메모/.test(lname);
+
+  if (node.type === 'TEXT' && node.characters && noteName) {
+    addContextNote(result, node.name, node.characters);
+  }
+
+  if ('description' in node && node.description) {
+    addContextNote(result, `${node.name || 'node'} description`, node.description);
+  }
+
+  if ('annotations' in node && Array.isArray(node.annotations) && node.annotations.length) {
+    node.annotations.forEach((ann, idx) => {
+      const value = typeof ann === 'string' ? ann : JSON.stringify(ann);
+      addContextNote(result, `${node.name || 'node'} annotation ${idx + 1}`, value);
+    });
+  }
+
+  try {
+    if (typeof node.getPluginDataKeys === 'function') {
+      node.getPluginDataKeys().forEach(key => {
+        if (/comment|annotation|note|memo|주석|코멘트|설명|메모/i.test(key)) {
+          addContextNote(result, `${node.name || 'node'} pluginData.${key}`, node.getPluginData(key));
+        }
+      });
+    }
+  } catch (e) { /* ignore inaccessible plugin data */ }
+}
+
 // 모달 구조 감지: 딤(반투명 어두운 전면 덮개) + 중앙 카드(밝은 라운드 컨테이너 + 제목/버튼)
 function detectModalParts(node, result) {
   var type = node.type;
@@ -627,6 +664,7 @@ function collectContext(node, result, depth) {
 
   // ── 내용·비주얼 기반 보완 독해 (레이어 이름이 일반적일 때 핵심) ──
   classifyByContent(node, result);
+  collectNodeContextNotes(node, result);
 
   // ── 모달·딤 처리 감지 ──
   detectModalParts(node, result);
@@ -665,7 +703,7 @@ function buildFrameSummary(node, opts) {
     modalCandidates: new Set(),
     // 테이블·스크롤 감지
     hasTable: false, hasScroll: false,
-    componentVariants: [], texts: [],
+    componentVariants: [], texts: [], contextNotes: new Set(),
   };
   collectContext(node, ctx, 0);
 
@@ -714,6 +752,7 @@ function buildFrameSummary(node, opts) {
     paginations: s(ctx.paginations),
     componentVariants: ctx.componentVariants.slice(0, 20),
     allTexts:  uniqueTexts,
+    contextNotes: s(ctx.contextNotes).slice(0, 40),
   };
 }
 
@@ -1962,6 +2001,46 @@ figma.ui.onmessage = async (msg) => {
       });
     } catch (e) {
       figma.ui.postMessage({ type: 'error', message: '프레임 분석 실패: ' + e.message });
+    }
+  }
+
+  if (msg.type === 'get-md-selection') {
+    try {
+      const includeCommon = !!msg.includeCommon;
+      const frames = getSelectedFrames({ includeCommon });
+      if (!frames || frames.length === 0) {
+        figma.ui.postMessage({ type: 'error', message: 'Figma 화면과 기능설명 영역을 선택해주세요.' });
+        return;
+      }
+
+      const sel = figma.currentPage.selection;
+      const selectionNodeIds = [];
+      for (let i = 0; i < sel.length; i++) {
+        selectionNodeIds.push(sel[i].id);
+        try {
+          const bytes = await sel[i].exportAsync({
+            format: 'PNG',
+            constraint: { type: 'SCALE', value: 2 },
+          });
+          frames[i].image = typeof figma.base64Encode === 'function'
+            ? figma.base64Encode(bytes)
+            : bytesToBase64(bytes);
+        } catch (e) {
+          frames[i].image = null;
+        }
+      }
+
+      for (let i = 0; i < frames.length && i < selectionNodeIds.length; i++) {
+        frames[i].nodeId = selectionNodeIds[i];
+      }
+
+      figma.ui.postMessage({
+        type: 'md-selection-data',
+        data: frames,
+        selectionNodeIds,
+      });
+    } catch (e) {
+      figma.ui.postMessage({ type: 'error', message: '기능명세 MD용 선택 영역 분석 실패: ' + e.message });
     }
   }
 

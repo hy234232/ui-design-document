@@ -6,6 +6,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const zlib = require('zlib');
 const { spawn } = require('child_process');
 const { execSync, execFileSync } = require('child_process');
 
@@ -16,6 +17,11 @@ const COMPONENT_REPO_URL = 'https://github.com/hy0909/designsystem.git';
 const COMPONENT_REPO_BRANCH = 'main';
 const COMPONENT_REPO_WORKDIR = path.join(__dirname, '.github-sync', 'designsystem');
 const COMPONENT_GITHUB_BASE = 'https://github.com/hy0909/designsystem/blob/main';
+const FEATURE_REPO_URL = 'git@github.com:hy234232/features.git';
+const FEATURE_REPO_BRANCH = 'main';
+const FEATURE_REPO_WORKDIR = path.join(__dirname, '.github-sync', 'features');
+const FEATURE_GITHUB_BASE = 'https://github.com/hy234232/features/blob/main';
+const FEATURE_SKILL_DIR = path.join(os.homedir(), '.codex', 'skills', 'feature-generator');
 
 // 디자인시스템.md 로드 — 매 분석 요청마다 호출되어 최신 내용을 반영.
 // 파일이 없거나 읽기 실패 시 빈 문자열 반환(분석은 계속 진행, 단순 폴백).
@@ -65,6 +71,23 @@ function slugifyAscii(input, fallback) {
   return slug || fallback || 'item';
 }
 
+function stripCodeFence(text) {
+  text = String(text || '').trim();
+  const m = text.match(/^```(?:md|markdown)?\s*([\s\S]*?)\s*```$/i);
+  return m ? m[1].trim() : text;
+}
+
+function readSkillFile(relPath, limit) {
+  try {
+    const p = path.join(FEATURE_SKILL_DIR, relPath);
+    let text = fs.readFileSync(p, 'utf8');
+    if (limit && text.length > limit) text = text.slice(0, limit) + '\n\n... (이하 생략)';
+    return text;
+  } catch (e) {
+    return '';
+  }
+}
+
 function componentScopedFilename(projectName, componentFilename, componentName, fileKey) {
   const projectRaw = String(projectName || fileKey || 'figma-project').trim();
   const projectSlug = slugifyAscii(projectRaw, 'project-' + shortHash(projectRaw));
@@ -104,6 +127,206 @@ function publishComponentMdToGithub(filename, markdown, componentName) {
   git(['commit', '-m', `Add ${safeName} component spec`], COMPONENT_REPO_WORKDIR);
   git(['push', 'origin', COMPONENT_REPO_BRANCH], COMPONENT_REPO_WORKDIR);
   return { committed: true, pushed: true };
+}
+
+function ensureFeatureRepo() {
+  const parent = path.dirname(FEATURE_REPO_WORKDIR);
+  if (!fs.existsSync(parent)) fs.mkdirSync(parent, { recursive: true });
+
+  if (!fs.existsSync(path.join(FEATURE_REPO_WORKDIR, '.git'))) {
+    git(['clone', FEATURE_REPO_URL, FEATURE_REPO_WORKDIR], __dirname);
+  }
+
+  try { git(['checkout', FEATURE_REPO_BRANCH], FEATURE_REPO_WORKDIR); } catch (e) { /* branch may already be default */ }
+  git(['pull', '--ff-only', 'origin', FEATURE_REPO_BRANCH], FEATURE_REPO_WORKDIR);
+}
+
+let crcTable = null;
+function crc32(buf) {
+  if (!crcTable) {
+    crcTable = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      crcTable[n] = c >>> 0;
+    }
+  }
+  let c = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) c = crcTable[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type, data) {
+  const typeBuf = Buffer.from(type, 'ascii');
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length, 0);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(Buffer.concat([typeBuf, data])), 0);
+  return Buffer.concat([len, typeBuf, data, crc]);
+}
+
+function paeth(a, b, c) {
+  const p = a + b - c;
+  const pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
+  return pa <= pb && pa <= pc ? a : (pb <= pc ? b : c);
+}
+
+function decodePngToRgba(input) {
+  const sig = input.slice(0, 8).toString('hex');
+  if (sig !== '89504e470d0a1a0a') throw new Error('PNG 파일이 아닙니다.');
+  let pos = 8, width = 0, height = 0, bitDepth = 0, colorType = 0;
+  const idats = [];
+  while (pos < input.length) {
+    const len = input.readUInt32BE(pos); pos += 4;
+    const type = input.slice(pos, pos + 4).toString('ascii'); pos += 4;
+    const data = input.slice(pos, pos + len); pos += len + 4;
+    if (type === 'IHDR') {
+      width = data.readUInt32BE(0);
+      height = data.readUInt32BE(4);
+      bitDepth = data[8];
+      colorType = data[9];
+    } else if (type === 'IDAT') {
+      idats.push(data);
+    } else if (type === 'IEND') {
+      break;
+    }
+  }
+  if (bitDepth !== 8) throw new Error('8-bit PNG만 지원합니다.');
+  const bppByType = { 0: 1, 2: 3, 4: 2, 6: 4 };
+  const bpp = bppByType[colorType];
+  if (!bpp) throw new Error(`지원하지 않는 PNG color type: ${colorType}`);
+
+  const raw = zlib.inflateSync(Buffer.concat(idats));
+  const stride = width * bpp;
+  const rows = [];
+  let off = 0;
+  for (let y = 0; y < height; y++) {
+    const filter = raw[off++];
+    const row = Buffer.from(raw.slice(off, off + stride));
+    off += stride;
+    const prev = rows[y - 1] || Buffer.alloc(stride);
+    for (let x = 0; x < stride; x++) {
+      const left = x >= bpp ? row[x - bpp] : 0;
+      const up = prev[x] || 0;
+      const upLeft = x >= bpp ? prev[x - bpp] : 0;
+      if (filter === 1) row[x] = (row[x] + left) & 0xff;
+      else if (filter === 2) row[x] = (row[x] + up) & 0xff;
+      else if (filter === 3) row[x] = (row[x] + Math.floor((left + up) / 2)) & 0xff;
+      else if (filter === 4) row[x] = (row[x] + paeth(left, up, upLeft)) & 0xff;
+      else if (filter !== 0) throw new Error(`지원하지 않는 PNG filter: ${filter}`);
+    }
+    rows.push(row);
+  }
+
+  const rgba = Buffer.alloc(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    const row = rows[y];
+    for (let x = 0; x < width; x++) {
+      const si = x * bpp;
+      const di = (y * width + x) * 4;
+      if (colorType === 0) {
+        rgba[di] = rgba[di + 1] = rgba[di + 2] = row[si];
+        rgba[di + 3] = 255;
+      } else if (colorType === 2) {
+        rgba[di] = row[si]; rgba[di + 1] = row[si + 1]; rgba[di + 2] = row[si + 2]; rgba[di + 3] = 255;
+      } else if (colorType === 4) {
+        rgba[di] = rgba[di + 1] = rgba[di + 2] = row[si];
+        rgba[di + 3] = row[si + 1];
+      } else if (colorType === 6) {
+        row.copy(rgba, di, si, si + 4);
+      }
+    }
+  }
+  return { width, height, rgba };
+}
+
+function encodeRgbaPng(width, height, rgba) {
+  const raw = Buffer.alloc((width * 4 + 1) * height);
+  let off = 0;
+  for (let y = 0; y < height; y++) {
+    raw[off++] = 0;
+    rgba.copy(raw, off, y * width * 4, (y + 1) * width * 4);
+    off += width * 4;
+  }
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;  // bit depth
+  ihdr[9] = 6;  // RGBA
+  ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
+  return Buffer.concat([
+    Buffer.from('89504e470d0a1a0a', 'hex'),
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', zlib.deflateSync(raw)),
+    pngChunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
+function addLightGrayPngBorder(input) {
+  const decoded = decodePngToRgba(input);
+  const outW = decoded.width + 2;
+  const outH = decoded.height + 2;
+  const out = Buffer.alloc(outW * outH * 4);
+  for (let i = 0; i < outW * outH; i++) {
+    out[i * 4] = 0xD9;
+    out[i * 4 + 1] = 0xDE;
+    out[i * 4 + 2] = 0xE7;
+    out[i * 4 + 3] = 0xff;
+  }
+  for (let y = 0; y < decoded.height; y++) {
+    decoded.rgba.copy(out, ((y + 1) * outW + 1) * 4, y * decoded.width * 4, (y + 1) * decoded.width * 4);
+  }
+  return encodeRgbaPng(outW, outH, out);
+}
+
+function publishFeatureMdToGithub(filename, markdown, imagePaths, title) {
+  ensureFeatureRepo();
+
+  filename = slugifyAscii(filename, 'feature-' + shortHash(markdown)).replace(/\.md$/i, '') + '.md';
+  const topic = filename.replace(/\.md$/i, '');
+  const assetRelDir = `assets/${topic}`;
+  markdown = stripCodeFence(markdown)
+    .replace(/assets\/\{\{topic\}\}/g, assetRelDir)
+    .replace(/assets\/<topic>/g, assetRelDir);
+  const assetDir = path.join(FEATURE_REPO_WORKDIR, assetRelDir);
+  if (!fs.existsSync(assetDir)) fs.mkdirSync(assetDir, { recursive: true });
+
+  const assetFiles = [];
+  (imagePaths || []).forEach((imgPath, idx) => {
+    try {
+      const outName = `screen-${idx + 1}.png`;
+      const bordered = addLightGrayPngBorder(fs.readFileSync(imgPath));
+      fs.writeFileSync(path.join(assetDir, outName), bordered);
+      assetFiles.push(`${assetRelDir}/${outName}`);
+    } catch (e) {
+      console.warn('[이미지 테두리 처리 실패]', e.message);
+    }
+  });
+
+  const mdPath = path.join(FEATURE_REPO_WORKDIR, filename);
+  fs.writeFileSync(mdPath, markdown, 'utf8');
+
+  git(['add', filename].concat(assetFiles), FEATURE_REPO_WORKDIR);
+  const status = git(['status', '--short'], FEATURE_REPO_WORKDIR);
+  if (!status) {
+    return {
+      filename,
+      githubUrl: `${FEATURE_GITHUB_BASE}/${filename}`,
+      committed: false,
+      pushed: false,
+      reason: 'no changes',
+    };
+  }
+
+  const safeTitle = String(title || filename).trim() || filename;
+  git(['commit', '-m', `Add ${safeTitle} feature spec`], FEATURE_REPO_WORKDIR);
+  git(['push', 'origin', FEATURE_REPO_BRANCH], FEATURE_REPO_WORKDIR);
+  return {
+    filename,
+    githubUrl: `${FEATURE_GITHUB_BASE}/${filename}`,
+    committed: true,
+    pushed: true,
+  };
 }
 
 // Claude Code CLI 경로 탐색
@@ -252,6 +475,7 @@ ${designSystem}
     if (f.drawers?.length)     lines.push(`### [플로우] 드로어: ${f.drawers.join(', ')}`);
     if (f.steppers?.length)    lines.push(`### [플로우] 스텝퍼: ${f.steppers.join(', ')}`);
     if (f.paginations?.length) lines.push(`### [플로우] 페이지네이션: ${f.paginations.join(', ')}`);
+    if (f.contextNotes?.length) lines.push(`### [맥락·주석] 선택 영역 내부 주석/설명: ${f.contextNotes.join(' / ')}`);
 
     // Tier 6 — 컴포넌트 Variant
     if (f.componentVariants?.length) {
@@ -568,6 +792,105 @@ ${wantError ? `  "errorCases": [
 - \`categoryNo\`는 반드시 1~10 숫자.
 - \`problem\`, \`design\`은 각각 1~2문장 이내.
 - 각 항목에는 \`devTitle\`, \`fe\`, \`be\`를 반드시 포함하세요. 플러그인 내부는 \`problem/design/components\`를, 캔버스는 \`devTitle/fe/be\`를 사용합니다.`}`;
+}
+
+function buildFeatureMdPrompt(payload, imagePaths) {
+  const frameData = Array.isArray(payload.frameData) ? payload.frameData : [];
+  const generatedFeatures = Array.isArray(payload.generatedFeatures) ? payload.generatedFeatures : [];
+  const overview = payload.overview || null;
+  const additionalText = String(payload.additionalText || '').trim();
+  const prdContent = String(payload.prdContent || '').trim();
+  const reqContent = String(payload.reqContent || '').trim();
+  const now = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  const today = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  const skillMain = readSkillFile('SKILL.md', 18000);
+  const commonMd = readSkillFile('references/common_md_structure.md', 14000);
+  const contentRules = readSkillFile('references/feature_content_rules.md', 12000);
+  const coreRules = readSkillFile('references/core_summary_rules.md', 12000);
+
+  const pageContext = frameData.map((f, idx) => {
+    const lines = [];
+    lines.push(`## 선택 영역 ${idx + 1}: "${f.frameName || 'Untitled'}"`);
+    if (f.titles?.length) lines.push(`- 타이틀: ${f.titles.join(', ')}`);
+    if (f.sections?.length) lines.push(`- 섹션: ${f.sections.join(', ')}`);
+    if (f.tabs?.length) lines.push(`- 탭/메뉴: ${f.tabs.join(', ')}`);
+    if (f.buttons?.length) lines.push(`- 버튼: ${f.buttons.join(', ')}`);
+    if (f.inputs?.length) lines.push(`- 입력필드: ${f.inputs.join(', ')}`);
+    if (f.selects?.length) lines.push(`- 셀렉트/드롭다운: ${f.selects.join(', ')}`);
+    if (f.tableHeaders?.length) lines.push(`- 테이블컬럼: ${f.tableHeaders.join(', ')}`);
+    if (f.hasTable) lines.push('- 테이블/목록 있음');
+    if (f.hasScroll) lines.push('- 스크롤 영역 있음');
+    if (f.listItems?.length) lines.push(`- 리스트아이템: ${f.listItems.slice(0, 10).join(', ')}`);
+    if (f.badges?.length) lines.push(`- 뱃지/상태: ${f.badges.join(', ')}`);
+    if (f.contextNotes?.length) lines.push(`- 선택 영역 내부 주석/설명: ${f.contextNotes.join(' / ')}`);
+    if (f.allTexts?.length) {
+      const textLines = f.allTexts.slice(0, 160).map(t => `  - ${t}`).join('\n');
+      lines.push(`- 화면/기능설명 텍스트:\n${textLines}`);
+    }
+    return lines.join('\n');
+  }).join('\n\n');
+
+  const featureText = generatedFeatures.length
+    ? generatedFeatures.map((f, i) => `${i + 1}. ${f.feature || '기능'}\n   - FE: ${f.fe || ''}\n   - BE: ${f.be || ''}`).join('\n')
+    : '(플러그인 기능 카드가 아직 없거나 전달되지 않았습니다. 선택 영역 텍스트와 추가 텍스트를 우선 사용하세요.)';
+
+  const imageRefs = imagePaths.map((p, i) => `- 화면 이미지 ${i + 1}: @${p}\n  - MD에 넣을 상대 경로: assets/{{topic}}/screen-${i + 1}.png`).join('\n') || '- 이미지 없음';
+
+  return `당신은 feature-generator 스킬을 따르는 한국어 기능명세서 MD 작성자입니다.
+아래 스킬 지침을 엄격히 적용해 기능명세서 Markdown 파일 1개를 생성하세요.
+
+## feature-generator/SKILL.md
+${skillMain}
+
+## references/common_md_structure.md
+${commonMd}
+
+## references/feature_content_rules.md
+${contentRules}
+
+## references/core_summary_rules.md
+${coreRules}
+
+## 입력 소스
+
+### 1) Figma 선택 영역 이미지
+${imageRefs}
+
+### 2) Figma 선택 영역 구조·텍스트·주석 맥락
+${pageContext || '(선택 영역 구조 정보 없음)'}
+
+### 3) 플러그인이 앞서 생성한 기능명세 카드 텍스트
+${featureText}
+
+### 4) 사용자가 MD 생성을 위해 추가 입력한 맥락 텍스트
+${additionalText || '(추가 텍스트 없음)'}
+
+${overview ? `### 5) 화면 설명\n- 제목: ${overview.title || ''}\n- 목적: ${overview.purpose || ''}` : ''}
+
+${prdContent ? `### 6) 첨부 PRD\n${prdContent.slice(0, 30000)}` : ''}
+${reqContent ? `### 7) 첨부 요구사항정의서\n${reqContent.slice(0, 30000)}` : ''}
+
+## 작성 기준
+- 최종 산출물은 기능명세서 Markdown입니다.
+- 스킬 지침의 Required MD Structure, Section Spacing Rule, Required Core Summary Tables, Fixed Requirement Columns를 반드시 지키세요.
+- 요구사항 테이블 컬럼명은 정확히 다음 순서로 작성하세요:
+  1depth | 2depth | 3depth | 요구사항 ID | 요구사항명 | 요청목적 | 기능 요구사항 | 프로세스 요구사항 | 화면 요구사항 | 보안 요구사항 | 데이터 요구사항
+- 화면 이미지가 있으면 본문 또는 관련 화면 섹션에 상대 경로로 포함하세요. 경로는 반드시 assets/<topic>/screen-N.png 형식을 사용하세요.
+- <topic>은 당신이 정한 filename에서 .md를 뺀 값입니다.
+- source에 없는 API endpoint, DB schema, enum, error code, analytics event, 내부 상태머신은 invent하지 마세요.
+- 추가 텍스트는 화면만으로 부족한 도메인 맥락이므로 가장 높은 우선순위로 반영하세요.
+- 선택 영역 내부 주석/설명은 사용자의 보충 맥락으로 보고 누락 없이 반영하세요.
+- 변경 이력의 일자는 ${today}, 작성자는 항상 "Codex, 김혜연"으로 작성하세요.
+- filename은 feature-generator의 File Naming Rules를 따르는 영문 소문자 kebab-case .md 파일명으로 정하세요.
+
+## 출력 형식
+JSON 객체만 출력하세요. 설명/마크다운 fence를 붙이지 마세요.
+{
+  "filename": "concise-topic.md",
+  "title": "문서 제목",
+  "markdown": "완성된 기능명세서 MD 전체"
+}`;
 }
 
 // ── 응답에서 JSON 객체/배열만 안전 추출 (코드펜스·앞뒤 산문·문자열 내 괄호 대응) ──
@@ -1112,6 +1435,75 @@ JSON 객체 1개만 출력하세요. 코드펜스 금지.
         res.end(JSON.stringify({ features, overview, edgeCases, errorCases, meta }));
       } catch (e) {
         console.error('[오류]', e.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/generate-feature-md') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const payload = JSON.parse(body);
+        const frameData = Array.isArray(payload.frameData) ? payload.frameData : [];
+        if (!frameData.length) throw new Error('선택 영역 정보가 없습니다. Figma 화면과 기능설명 영역을 선택해주세요.');
+
+        const imgDir = path.join(__dirname, 'logs', 'feature-md');
+        if (!fs.existsSync(imgDir)) fs.mkdirSync(imgDir, { recursive: true });
+        const imagePaths = [];
+        frameData.forEach((f, i) => {
+          if (f.image) {
+            try {
+              const p = path.join(imgDir, `feature-md-frame-${i + 1}.png`);
+              fs.writeFileSync(p, Buffer.from(f.image, 'base64'));
+              imagePaths.push(p);
+              f._imagePath = p;
+            } catch (ie) { /* ignore */ }
+          }
+          delete f.image;
+        });
+
+        const prompt = buildFeatureMdPrompt(Object.assign({}, payload, { frameData }), imagePaths);
+        try {
+          fs.writeFileSync(path.join(imgDir, 'last-feature-md-framedata.json'), JSON.stringify(frameData, null, 2));
+          fs.writeFileSync(path.join(imgDir, 'last-feature-md-prompt.txt'), prompt);
+        } catch (de) { /* ignore */ }
+
+        console.log(`[기능명세 MD] 생성 요청 · 선택영역 ${frameData.length}개 · 이미지 ${imagePaths.length}개`);
+        const raw = await callClaudeCLI(prompt);
+        try { fs.writeFileSync(path.join(imgDir, 'last-feature-md-response.txt'), String(raw || '')); } catch (de) { /* ignore */ }
+
+        const jsonStr = extractJson(raw);
+        if (!jsonStr) throw new Error('기능명세 MD 응답에서 JSON을 찾을 수 없습니다. 응답 일부: ' + String(raw || '').slice(0, 200));
+
+        let parsed;
+        try {
+          parsed = JSON.parse(jsonStr);
+        } catch (pe) {
+          throw new Error('기능명세 MD JSON 파싱 실패: ' + pe.message + ' | 추출된 내용: ' + jsonStr.slice(0, 200));
+        }
+
+        const markdown = stripCodeFence(parsed.markdown || '');
+        if (!markdown || markdown.length < 200) throw new Error('생성된 Markdown 내용이 비어 있거나 너무 짧습니다.');
+        const filename = String(parsed.filename || parsed.title || 'feature-spec').trim();
+        const published = publishFeatureMdToGithub(filename, markdown, imagePaths, parsed.title || filename);
+
+        console.log(`[기능명세 MD] ${published.filename} · GitHub ${published.pushed ? '푸시 완료' : '변경 없음'}`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          ok: true,
+          filename: published.filename,
+          title: parsed.title || published.filename,
+          githubUrl: published.githubUrl,
+          committed: published.committed,
+          pushed: published.pushed,
+          reason: published.reason || null,
+        }));
+      } catch (e) {
+        console.error('[기능명세 MD 오류]', e.message);
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: e.message }));
       }
