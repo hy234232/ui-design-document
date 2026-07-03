@@ -1,7 +1,7 @@
 figma.showUI(__html__, { width: 480, height: 720, title: '핸드오프문서 자동생성기' });
 
 // ── 화면 흐름 화살표 상태 ──
-var flowState = { autoFlow: true, color: '#FF37E8' };
+var flowState = { autoFlow: false, color: '#FF37E8' };
 var lastFlowPair = '';
 
 function hexToRgbObj(hex) {
