@@ -137,8 +137,20 @@ function ensureFeatureRepo() {
     git(['clone', FEATURE_REPO_URL, FEATURE_REPO_WORKDIR], __dirname);
   }
 
-  try { git(['checkout', FEATURE_REPO_BRANCH], FEATURE_REPO_WORKDIR); } catch (e) { /* branch may already be default */ }
-  git(['pull', '--ff-only', 'origin', FEATURE_REPO_BRANCH], FEATURE_REPO_WORKDIR);
+  let hasLocalHead = true;
+  try { git(['rev-parse', '--verify', 'HEAD'], FEATURE_REPO_WORKDIR); } catch (e) { hasLocalHead = false; }
+
+  let hasRemoteBranch = true;
+  try { git(['ls-remote', '--exit-code', '--heads', 'origin', FEATURE_REPO_BRANCH], FEATURE_REPO_WORKDIR); } catch (e) { hasRemoteBranch = false; }
+
+  if (!hasLocalHead && !hasRemoteBranch) {
+    // Empty GitHub repo: create the first local branch and let the first publish push it.
+    try { git(['checkout', '-B', FEATURE_REPO_BRANCH], FEATURE_REPO_WORKDIR); } catch (e) { /* git may already be on unborn branch */ }
+    return;
+  }
+
+  try { git(['checkout', FEATURE_REPO_BRANCH], FEATURE_REPO_WORKDIR); } catch (e) { git(['checkout', '-B', FEATURE_REPO_BRANCH], FEATURE_REPO_WORKDIR); }
+  if (hasRemoteBranch) git(['pull', '--ff-only', 'origin', FEATURE_REPO_BRANCH], FEATURE_REPO_WORKDIR);
 }
 
 let crcTable = null;
@@ -929,7 +941,7 @@ function extractJson(raw) {
 }
 
 // ── Claude Code CLI 호출 ──
-function callClaudeCLI(prompt, retriedAfterMissingCli = false) {
+function callClaudeCLI(prompt, retriedAfterMissingCli = false, timeoutMs = 240000) {
   return new Promise((resolve, reject) => {
     const claudePath = getClaudeCLI(retriedAfterMissingCli);
     if (!claudePath) {
@@ -954,7 +966,7 @@ function callClaudeCLI(prompt, retriedAfterMissingCli = false) {
     const timer = setTimeout(() => {
       timedOut = true;
       try { proc.kill('SIGTERM'); } catch (e) { /* */ }
-    }, 240000);
+    }, timeoutMs);
 
     proc.once('spawn', () => {
       proc.stdin.write(prompt, 'utf8');
@@ -974,7 +986,7 @@ function callClaudeCLI(prompt, retriedAfterMissingCli = false) {
       settled = true;
       clearTimeout(timer);
       if (timedOut) {
-        reject(new Error('Claude 응답 시간 초과(240초). 화면이 매우 복잡하거나 CLI가 느립니다. 잠시 후 다시 시도하세요.'));
+        reject(new Error(`Claude 응답 시간 초과(${Math.round(timeoutMs / 1000)}초). 선택 영역이 너무 많거나 CLI가 느립니다. 화면 프레임과 기능설명 영역 위주로 다시 선택해보세요.`));
         return;
       }
       if (code !== 0) {
@@ -996,7 +1008,7 @@ function callClaudeCLI(prompt, retriedAfterMissingCli = false) {
 
       if (err.code === 'ENOENT' && !retriedAfterMissingCli) {
         cachedClaudePath = null;
-        callClaudeCLI(prompt, true).then(resolve, reject);
+        callClaudeCLI(prompt, true, timeoutMs).then(resolve, reject);
         return;
       }
 
@@ -1467,14 +1479,15 @@ JSON 객체 1개만 출력하세요. 코드펜스 금지.
           delete f.image;
         });
 
-        const prompt = buildFeatureMdPrompt(Object.assign({}, payload, { frameData }), imagePaths);
+        const promptImagePaths = imagePaths.slice(0, 6);
+        const prompt = buildFeatureMdPrompt(Object.assign({}, payload, { frameData }), promptImagePaths);
         try {
           fs.writeFileSync(path.join(imgDir, 'last-feature-md-framedata.json'), JSON.stringify(frameData, null, 2));
           fs.writeFileSync(path.join(imgDir, 'last-feature-md-prompt.txt'), prompt);
         } catch (de) { /* ignore */ }
 
-        console.log(`[기능명세 MD] 생성 요청 · 선택영역 ${frameData.length}개 · 이미지 ${imagePaths.length}개`);
-        const raw = await callClaudeCLI(prompt);
+        console.log(`[기능명세 MD] 생성 요청 · 선택영역 ${frameData.length}개 · 이미지 ${imagePaths.length}개 · 프롬프트 이미지 ${promptImagePaths.length}개`);
+        const raw = await callClaudeCLI(prompt, false, 600000);
         try { fs.writeFileSync(path.join(imgDir, 'last-feature-md-response.txt'), String(raw || '')); } catch (de) { /* ignore */ }
 
         const jsonStr = extractJson(raw);
@@ -1505,6 +1518,11 @@ JSON 객체 1개만 출력하세요. 코드펜스 금지.
         }));
       } catch (e) {
         console.error('[기능명세 MD 오류]', e.message);
+        try {
+          const imgDir = path.join(__dirname, 'logs', 'feature-md');
+          if (!fs.existsSync(imgDir)) fs.mkdirSync(imgDir, { recursive: true });
+          fs.writeFileSync(path.join(imgDir, 'last-feature-md-error.txt'), e.stack || e.message || String(e), 'utf8');
+        } catch (de) { /* ignore */ }
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: e.message }));
       }

@@ -168,6 +168,12 @@
   }
   .md-builder textarea:focus { outline: 1px solid #7c6af7; border-color: #7c6af7; }
   .md-builder-help { font-size: 10px; color: #777; line-height: 1.6; }
+  .md-extra-preview {
+    display: none;
+    font-size: 10px; color: #6f7480; line-height: 1.6;
+    background: #202020; border: 1px solid #2d2d2d; border-radius: 6px;
+    padding: 8px 9px; white-space: pre-wrap;
+  }
   .md-link-card {
     background: #1f2330; border: 1px solid #39415a; border-radius: 7px;
     padding: 9px 11px; font-size: 11px; line-height: 1.6;
@@ -454,6 +460,7 @@
         <span style="font-size:10px;color:#777;font-weight:500;">hy234232/features 자동 커밋·푸시</span>
       </div>
       <textarea id="featureMdExtraText" placeholder="추가 텍스트를 입력하세요. 예: SOP 상태 4종류는 위험 단계 1~3단계에 따라 종류가 달라짐. 단계별 상태 기준과 보고서 작성 조건을 기능명세에 반영."></textarea>
+      <div id="featureMdExtraPreview" class="md-extra-preview"></div>
       <button class="btn btn-primary" id="generateFeatureMdBtn" onclick="generateFeatureMd()">기능명세 MD 생성</button>
       <div class="md-builder-help">
         Figma 화면과 기능설명 영역을 함께 선택한 뒤 실행하세요. 선택 영역 내부의 주석/설명 텍스트와 위 추가 텍스트를 함께 읽어 feature-generator 스킬 형식의 MD를 생성합니다.
@@ -1078,6 +1085,12 @@
 
     const btn = document.getElementById('generateFeatureMdBtn');
     btn.disabled = true;
+    const extraText = document.getElementById('featureMdExtraText').value || '';
+    const preview = document.getElementById('featureMdExtraPreview');
+    preview.style.display = 'block';
+    preview.textContent = extraText.trim()
+      ? `입력한 추가 텍스트\n${extraText.trim()}`
+      : '입력한 추가 텍스트 없음';
     document.getElementById('featureMdResult').innerHTML = '';
     setStatus('기능명세 MD용 선택 영역 분석 중...', 'loading');
     Progress.begin('선택 화면·기능설명 수집 중', 0, 12, 5, true);
