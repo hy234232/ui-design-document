@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// 기능 명세 생성기 — Claude Code CLI 브릿지 서버
-// 실행: node server.js  (API 키 불필요, Claude Code 로그인 상태 사용)
+// 기능 명세 생성기 — Codex CLI 브릿지 서버
+// 실행: node server.js  (API 키 불필요, Codex 로그인 세션 사용)
 
 const http = require('http');
 const fs = require('fs');
@@ -10,8 +10,9 @@ const { spawn } = require('child_process');
 const { execSync, execFileSync } = require('child_process');
 
 const PORT = 3765;
-const MODEL = 'claude-sonnet-4-6'; // 생성에 사용하는 모델 (변경 시 하단 메타에 그대로 반영됨)
+const MODEL = process.env.CODEX_MODEL || ''; // 비어 있으면 Codex CLI 기본 모델 사용
 const DESIGN_SYSTEM_PATH = path.join(__dirname, '디자인시스템.md');
+const DESIGN_SYSTEM_DIR = path.join(__dirname, 'design-system');
 const COMPONENT_REPO_URL = 'https://github.com/hy0909/designsystem.git';
 const COMPONENT_REPO_BRANCH = 'main';
 const COMPONENT_REPO_WORKDIR = path.join(__dirname, '.github-sync', 'designsystem');
@@ -86,85 +87,87 @@ function ensureComponentRepo() {
   git(['pull', '--ff-only', 'origin', COMPONENT_REPO_BRANCH], COMPONENT_REPO_WORKDIR);
 }
 
-function publishComponentMdToGithub(filename, markdown, componentName) {
+// repoSlug: 컴포넌트 slug (예: "input", "button") — 폴더명 + 파일명으로 사용
+// 저장 경로: {repoSlug}/{repoSlug}.md  (예: input/input.md)
+function injectComponentPreview(markdown, imagePath, componentName) {
+  if (!imagePath || !markdown) return markdown;
+  if (/!\[[^\]]*컴포넌트\s*캡쳐[^\]]*\]\(/.test(markdown) || markdown.includes(imagePath)) return markdown;
+  const previewBlock = `\n\n## Component Preview\n\n![${componentName || '컴포넌트'} 캡쳐 이미지](${imagePath})\n`;
+  const firstHeading = markdown.match(/^# .+$/m);
+  if (!firstHeading) return previewBlock.trim() + '\n\n' + markdown;
+  const insertAt = firstHeading.index + firstHeading[0].length;
+  return markdown.slice(0, insertAt) + previewBlock + markdown.slice(insertAt);
+}
+
+function publishComponentMdToGithub(repoSlug, markdown, componentName, imageBuffer) {
   ensureComponentRepo();
 
-  const repoDesignDir = path.join(COMPONENT_REPO_WORKDIR, 'design-system');
-  if (!fs.existsSync(repoDesignDir)) fs.mkdirSync(repoDesignDir, { recursive: true });
-  const repoOutPath = path.join(repoDesignDir, filename);
+  const repoCompDir = path.join(COMPONENT_REPO_WORKDIR, repoSlug);
+  if (!fs.existsSync(repoCompDir)) fs.mkdirSync(repoCompDir, { recursive: true });
+  if (imageBuffer) {
+    fs.writeFileSync(path.join(repoCompDir, 'preview.png'), imageBuffer);
+  }
+  const repoFilename = repoSlug + '.md';
+  const repoOutPath = path.join(repoCompDir, repoFilename);
   fs.writeFileSync(repoOutPath, markdown, 'utf8');
 
-  git(['add', `design-system/${filename}`], COMPONENT_REPO_WORKDIR);
+  git(['add', `${repoSlug}/${repoFilename}`], COMPONENT_REPO_WORKDIR);
+  if (imageBuffer) git(['add', `${repoSlug}/preview.png`], COMPONENT_REPO_WORKDIR);
   const status = git(['status', '--short'], COMPONENT_REPO_WORKDIR);
   if (!status) {
     return { committed: false, pushed: false, reason: 'no changes' };
   }
 
-  const safeName = String(componentName || filename).trim() || filename;
-  git(['commit', '-m', `Add ${safeName} component spec`], COMPONENT_REPO_WORKDIR);
+  const safeName = String(componentName || repoSlug).trim() || repoSlug;
+  git(['commit', '-m', `Add ${safeName} component md`], COMPONENT_REPO_WORKDIR);
+  git(['push', 'origin', COMPONENT_REPO_BRANCH], COMPONENT_REPO_WORKDIR);
+  return { committed: true, pushed: true, repoSlug, repoFilename };
+}
+
+// 기존 MD 파일에서 특정 섹션(Design Tokens)만 교체하고 푸시
+function updateComponentMdTokensInGithub(repoSlug, patchedMarkdown, componentName) {
+  ensureComponentRepo();
+
+  const repoFilename = repoSlug + '.md';
+  const repoOutPath = path.join(COMPONENT_REPO_WORKDIR, repoSlug, repoFilename);
+  fs.writeFileSync(repoOutPath, patchedMarkdown, 'utf8');
+
+  git(['add', `${repoSlug}/${repoFilename}`], COMPONENT_REPO_WORKDIR);
+  const status = git(['status', '--short'], COMPONENT_REPO_WORKDIR);
+  if (!status) {
+    return { committed: false, pushed: false, reason: 'no changes' };
+  }
+
+  const safeName = String(componentName || repoSlug).trim() || repoSlug;
+  git(['commit', '-m', `Update ${safeName} design tokens`], COMPONENT_REPO_WORKDIR);
   git(['push', 'origin', COMPONENT_REPO_BRANCH], COMPONENT_REPO_WORKDIR);
   return { committed: true, pushed: true };
 }
 
-// Claude Code CLI 경로 탐색
-function findClaudeCLI() {
-  // Claude Desktop 앱 내장 CLI — 버전 폴더를 동적으로 탐색
-  const claudeCodeDir = `${process.env.HOME}/Library/Application Support/Claude/claude-code`;
-  try {
-    const versions = require('fs').readdirSync(claudeCodeDir).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
-    for (const ver of versions) {
-      const p = `${claudeCodeDir}/${ver}/claude.app/Contents/MacOS/claude`;
-      try {
-        execSync(`test -x "${p}"`, { stdio: 'ignore' });
-        return p;
-      } catch { /* skip */ }
-    }
-  } catch { /* dir not found */ }
-
+// Codex CLI 경로 탐색
+function findCodexCLI() {
   const candidates = [
-    '/usr/local/bin/claude',
-    '/opt/homebrew/bin/claude',
-    `${process.env.HOME}/.npm-global/bin/claude`,
-    `${process.env.HOME}/.local/bin/claude`,
+    '/Applications/Codex.app/Contents/Resources/codex',
+    '/usr/local/bin/codex',
+    '/opt/homebrew/bin/codex',
+    `/Users/hy/.npm-global/bin/codex`,
+    `/Users/hy/.local/bin/codex`,
   ];
   for (const p of candidates) {
-    try {
-      execSync(`test -x "${p}"`, { stdio: 'ignore' });
-      return p;
-    } catch { /* skip */ }
+    try { execSync(`test -x "${p}"`, { stdio: 'ignore' }); return p; }
+    catch { /* skip */ }
   }
-  // PATH에서 탐색
-  try { return execSync('which claude', { encoding: 'utf8' }).trim(); } catch { return null; }
+  try { return execSync('which codex', { encoding: 'utf8' }).trim(); } catch { return null; }
 }
 
-let cachedClaudePath = null;
-
-function isExecutable(filePath) {
-  if (!filePath) return false;
-  try {
-    fs.accessSync(filePath, fs.constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function getClaudeCLI(forceRefresh = false) {
-  if (!forceRefresh && isExecutable(cachedClaudePath)) return cachedClaudePath;
-  cachedClaudePath = findClaudeCLI();
-  return cachedClaudePath;
-}
-
-const initialClaudePath = getClaudeCLI(true);
-
-if (!initialClaudePath) {
-  console.error('[오류] Claude Code CLI를 찾을 수 없습니다.');
-  console.error('  Claude Desktop 앱이 설치되어 있는지 확인하거나');
-  console.error('  npm install -g @anthropic-ai/claude-code 로 설치해주세요.');
+const CODEX_PATH = findCodexCLI();
+if (!CODEX_PATH) {
+  console.error('[오류] Codex CLI를 찾을 수 없습니다.');
+  console.error('  Codex 앱이 설치되어 있는지 확인하거나 codex CLI를 PATH에 추가해주세요.');
   process.exit(1);
 }
-
-console.log(`[정보] Claude CLI: ${initialClaudePath}`);
+console.log(`[정보] Codex CLI: ${CODEX_PATH}`);
+console.log(`[정보] Codex 모델: ${MODEL || 'Codex CLI 기본값'}`);
 
 // ── 프롬프트 ──
 function buildPrompt(frameData, docSection, hasDocs, imagePaths, previousFeatures, includeCommon, mode, reqFlags) {
@@ -192,12 +195,12 @@ function buildPrompt(frameData, docSection, hasDocs, imagePaths, previousFeature
 - 디자인시스템에 정의되지 않은 컴포넌트만 LLM 추론으로 결정.
 - 디자인시스템과 화면이 충돌하면 화면 우선, 단 모호한 부분은 디자인시스템으로 결정.
 
-### 컴포넌트별 상세 명세 링크(docLink) 자동 첨부 규칙 — NEW (중요)
+### 컴포넌트별 md 링크(docLink) 자동 첨부 규칙 — NEW (중요)
 디자인시스템 정의에서 컴포넌트 섹션마다 다음 형식의 줄을 찾으세요:
-\`- **상세 명세 (GitHub)**: [표시명](URL)\`
+\`- **컴포넌트 md (GitHub)**: [표시명](URL)\`
 
 기능이 해당 컴포넌트(예: 토스트, 모달, 인풋 등)를 사용하면 그 feature의 \`docLink\` 필드에 다음과 같이 첨부하세요:
-\`"docLink": { "label": "Toast 상세 명세", "url": "https://github.com/.../toast-notification.md" }\`
+\`"docLink": { "label": "Toast 컴포넌트 md", "url": "https://github.com/.../toast-notification.md" }\`
 
 - url은 디자인시스템.md에 적힌 그대로(PLACEHOLDER 포함이어도 그대로) 복사.
 - 한 기능이 여러 컴포넌트를 쓰면 **가장 핵심적인 하나의 컴포넌트** docLink만 첨부.
@@ -337,16 +340,17 @@ ${includeCommon ? `**공통 기능 명세 모드 (🧱 공통기능 읽기 = ON)
 - **토스트는 항상 다음 동작으로 고정해서 적습니다:** "**3초 뒤 자동으로 사라지며, 서서히 나타났다가(fade-in) 서서히 사라진다(fade-out)**".
 - 토스트 FE 할일 표준형: 「토스트 알림 표시 — fade-in 후 3초 뒤 fade-out으로 자동 사라짐」.
 
-**위치 좌표(anchor) 규칙 — 매우 중요 (NEW)**
-- 각 기능마다 화면에서 그 기능의 **트리거 UI 요소가 위치한 좌표**를 \`anchor\` 객체로 반환하세요.
+**위치 좌표(anchor) 규칙 — 매우 중요**
+- 각 기능마다 화면에서 그 기능의 **트리거 UI 요소의 좌상단(top-left) 모서리 좌표**를 \`anchor\` 객체로 반환하세요.
 - \`anchor.x\`: 0~1 사이 상대 좌표 (이미지 좌측 끝=0, 우측 끝=1).
 - \`anchor.y\`: 0~1 사이 상대 좌표 (이미지 상단=0, 하단=1).
-- \`anchor.note\`: 어떤 UI 요소를 가리키는지 짧은 설명 (예: "기간 셀렉트", "초대 버튼", "이메일 인풋").
-- 좌표는 해당 UI 요소의 **시각적 중심점**을 가리키도록 합니다.
-- 이미지를 직접 보고(Read 도구로) UI 요소의 화면상 위치를 측정해서 0~1 비율로 환산하세요.
-- 기능이 여러 요소를 다루면(예: 인풋+버튼) 가장 대표적인 트리거(보통 버튼)의 위치를 사용.
+- \`anchor.note\`: 어떤 UI 요소를 가리키는지 짧은 설명 (예: "저장 버튼", "프로젝트명 인풋", "이메일 인풋").
+- 좌표는 해당 UI 요소(버튼·인풋·셀렉트 등)의 **좌상단 모서리(top-left corner)** 를 정확히 가리켜야 합니다. 중심점이 아닙니다.
+- **이유**: 플러그인은 이 좌표 기준으로 핑크 번호 뱃지를 **컴포넌트 좌상단 외부에 부착**합니다. 좌상단이 정확해야 뱃지가 컴포넌트 텍스트·내용을 가리지 않고 항상 통일된 위치(위·왼쪽)에 놓입니다.
+- 이미지를 직접 보고(Read 도구로) UI 요소의 좌상단 픽셀 위치를 측정해서 0~1 비율로 환산하세요.
+- 기능이 여러 요소를 다루면(예: 인풋+버튼) 가장 대표적인 트리거(보통 버튼)의 좌상단을 사용.
 - 화면 전반에 걸치거나 위치를 특정하기 어려우면 \`anchor: null\` 로 반환 (그래도 기능은 포함).
-- **위치 정확도가 중요합니다.** 대충 찍지 말고 실제 이미지 좌표를 측정해서 0~1 비율로 정밀하게 계산하세요.
+- **위치 정확도가 중요합니다.** 대충 찍지 말고 실제 이미지의 좌상단 모서리 좌표를 측정해서 0~1 비율로 정밀하게 계산하세요.
 
 **테이블·스크롤 규칙 (고정)**
 - 화면에 테이블/목록(「[데이터·테이블]」, 테이블컬럼, 리스트아이템 등)이 있으면 **목록 조회/표시 기능**을 명세에 포함하세요. (컬럼 표시, 행 단위 액션 등)
@@ -482,7 +486,7 @@ ${mode === 'spec' ? `형식 예시 (이 구조의 JSON만 출력):
       "fe": "FE 구현 할일 (40자 이내)",
       "be": "BE 구현 할일 (40자 이내)",
       "anchor": { "x": 0.42, "y": 0.18, "note": "기간 셀렉트" },
-      "docLink": { "label": "Toast 상세 명세", "url": "https://github.com/.../toast-notification.md" }
+      "docLink": { "label": "Toast 컴포넌트 md", "url": "https://github.com/.../toast-notification.md" }
     }
   ]
 }
@@ -596,79 +600,72 @@ function extractJson(raw) {
   return null; // 닫는 괄호를 못 찾음
 }
 
-// ── Claude Code CLI 호출 ──
-function callClaudeCLI(prompt, retriedAfterMissingCli = false) {
-  return new Promise((resolve, reject) => {
-    const claudePath = getClaudeCLI(retriedAfterMissingCli);
-    if (!claudePath) {
-      reject(new Error('Claude Code CLI를 찾을 수 없습니다. Claude Desktop을 실행하거나 Claude Code를 다시 설치해주세요.'));
-      return;
-    }
+// ── Codex CLI 호출 ──
+function extractPromptImagePaths(prompt) {
+  const paths = [];
+  const re = /@([^\s)]+\.(?:png|jpg|jpeg|webp))/gi;
+  let m;
+  while ((m = re.exec(String(prompt || '')))) {
+    const img = m[1];
+    if (fs.existsSync(img) && !paths.includes(img)) paths.push(img);
+  }
+  return paths;
+}
 
-    const proc = spawn(claudePath, [
-      '--print',
-      '--output-format', 'text',
-      '--model', MODEL,
-      '--allowedTools', 'Read',
-    ], {
+function callCodexCLI(prompt) {
+  return new Promise((resolve, reject) => {
+    const outFile = path.join(os.tmpdir(), `figma-codex-response-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`);
+    const args = [
+      'exec',
+      '--skip-git-repo-check',
+      '--ignore-user-config',
+      '--ignore-rules',
+      '--sandbox', 'read-only',
+      '--output-last-message', outFile,
+      '-C', __dirname,
+    ];
+    if (MODEL) args.push('--model', MODEL);
+    for (const imgPath of extractPromptImagePaths(prompt)) args.push('--image', imgPath);
+    args.push('-');
+
+    const proc = spawn(CODEX_PATH, args, {
       env: { ...process.env },
-      cwd: __dirname, // 루트('/') 대신 figma 폴더로 고정 — 네트워크 볼륨·구글드라이브 스캔 방지
+      cwd: __dirname,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
-    // 직접 타임아웃 관리 (SIGTERM 143 대신 명확한 메시지)
-    let settled = false;
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
       try { proc.kill('SIGTERM'); } catch (e) { /* */ }
-    }, 240000);
+    }, 300000);
 
-    proc.once('spawn', () => {
-      proc.stdin.write(prompt, 'utf8');
-      proc.stdin.end();
-    });
-
-    proc.stdin.on('error', () => { /* spawn 실패 시 error 이벤트에서 처리 */ });
+    proc.stdin.write(prompt, 'utf8');
+    proc.stdin.end();
 
     let stdout = '';
     let stderr = '';
-
     proc.stdout.on('data', d => { stdout += d; });
     proc.stderr.on('data', d => { stderr += d; });
 
     proc.on('close', (code) => {
-      if (settled) return;
-      settled = true;
       clearTimeout(timer);
-      if (timedOut) {
-        reject(new Error('Claude 응답 시간 초과(240초). 화면이 매우 복잡하거나 CLI가 느립니다. 잠시 후 다시 시도하세요.'));
-        return;
-      }
+      if (timedOut) return reject(new Error('Codex 응답 시간 초과(300초). 화면이 매우 복잡합니다. 잠시 후 다시 시도하세요.'));
+      let finalText = '';
+      try { if (fs.existsSync(outFile)) finalText = fs.readFileSync(outFile, 'utf8').trim(); } catch (e) { /* ignore */ }
+      try { if (fs.existsSync(outFile)) fs.unlinkSync(outFile); } catch (e) { /* ignore */ }
       if (code !== 0) {
-        const msg = stderr.trim() || stdout.trim();
-        if (msg.includes('Not logged in') || msg.includes('login')) {
-          reject(new Error('Claude Code CLI 로그인 필요 — 터미널에서 claude /login 실행 후 재시도하세요.'));
-        } else {
-          reject(new Error(msg || `claude 프로세스 종료 코드: ${code}`));
-        }
+        const msg = stderr.trim() || stdout.trim() || finalText;
+        if (/not logged in|login|auth|authentication/i.test(msg)) reject(new Error('Codex CLI 로그인 필요 — 터미널에서 codex login 실행 후 재시도하세요.'));
+        else reject(new Error(msg || `codex 프로세스 종료 코드: ${code}`));
       } else {
-        resolve(stdout.trim());
+        resolve((finalText || stdout).trim());
       }
     });
-
     proc.on('error', (err) => {
-      if (settled) return;
-      settled = true;
       clearTimeout(timer);
-
-      if (err.code === 'ENOENT' && !retriedAfterMissingCli) {
-        cachedClaudePath = null;
-        callClaudeCLI(prompt, true).then(resolve, reject);
-        return;
-      }
-
-      reject(new Error(`CLI 실행 실패: ${err.message}`));
+      try { if (fs.existsSync(outFile)) fs.unlinkSync(outFile); } catch (e) { /* ignore */ }
+      reject(new Error(`Codex CLI 실행 실패: ${err.message}`));
     });
   });
 }
@@ -683,11 +680,58 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'GET' && req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, cli: getClaudeCLI() }));
+    res.end(JSON.stringify({ ok: true, cli: CODEX_PATH, model: MODEL || 'codex-default' }));
     return;
   }
 
-  // 컴포넌트 → md 명세 생성 (toast-notification.md 형식)
+  // ── 저장소 내 기존 컴포넌트 MD 목록 반환 ──
+  if (req.method === 'GET' && req.url === '/list-component-mds') {
+    try {
+      const files = [];
+
+      // GitHub 저장소에서 탐색 (pull 후)
+      try {
+        ensureComponentRepo();
+        const entries = fs.readdirSync(COMPONENT_REPO_WORKDIR, { withFileTypes: true });
+        for (const entry of entries) {
+          if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+          const slug = entry.name;
+          const mdPath = path.join(COMPONENT_REPO_WORKDIR, slug, slug + '.md');
+          if (fs.existsSync(mdPath)) {
+            files.push({
+              slug,
+              repoPath: `${slug}/${slug}.md`,
+              githubUrl: `${COMPONENT_GITHUB_BASE}/${slug}/${slug}.md`,
+              source: 'github',
+            });
+          }
+        }
+      } catch (ge) {
+        console.warn('[list-component-mds] GitHub 접근 실패:', ge.message);
+      }
+
+      // 로컬 design-system/ 폴더도 병합 (저장소에 없는 것만)
+      const localDir = path.join(__dirname, 'design-system');
+      if (fs.existsSync(localDir)) {
+        const localFiles = fs.readdirSync(localDir).filter(f => f.endsWith('.md'));
+        for (const f of localFiles) {
+          const slug = f.replace(/\.md$/i, '');
+          if (!files.some(x => x.slug === slug)) {
+            files.push({ slug, repoPath: `design-system/${f}`, githubUrl: null, source: 'local' });
+          }
+        }
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ files }));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
+  // 컴포넌트 → 컴포넌트 md 생성 (toast-notification.md 형식)
   if (req.method === 'POST' && req.url === '/extract-component-md') {
     let body = '';
     req.on('data', chunk => body += chunk);
@@ -698,9 +742,13 @@ const server = http.createServer(async (req, res) => {
 
         const imgDir = path.join(__dirname, 'logs');
         let imgPath = null;
+        let componentImageBuffer = null;
         if (image) {
           imgPath = path.join(imgDir, 'component-input.png');
-          try { fs.writeFileSync(imgPath, Buffer.from(image, 'base64')); } catch (e) { imgPath = null; }
+          try {
+            componentImageBuffer = Buffer.from(image, 'base64');
+            fs.writeFileSync(imgPath, componentImageBuffer);
+          } catch (e) { imgPath = null; componentImageBuffer = null; }
         }
 
         // 템플릿 로드 (toast-notification.md 사용)
@@ -723,7 +771,7 @@ const server = http.createServer(async (req, res) => {
         const textsText = (component.texts || []).slice(0, 40).join(' / ') || '(없음)';
 
         const prompt = `당신은 시니어 디자인 시스템 작성자입니다.
-선택된 Figma 컴포넌트를 분석해서 **아래 템플릿과 동일한 구조**의 마크다운 명세 파일을 작성하세요.
+선택된 Figma 컴포넌트를 분석해서 **아래 템플릿과 동일한 구조**의 컴포넌트 md 파일을 작성하세요.
 
 ## 입력 — 선택된 컴포넌트
 
@@ -755,6 +803,8 @@ ${template || '(템플릿 없음 — 직접 toast-notification.md 형식 따를 
 - 위 템플릿의 **섹션 순서·헤딩·표 컬럼·blockquote 형식을 그대로** 따르세요.
 - 비어 있는 필드는 합리적인 디폴트로 채우거나 \`(검토 필요)\` 마커.
 - Variant·토큰·문구는 위 입력 데이터(수집된 텍스트·variantProperties)에 기반해 채우고, 데이터가 부족한 부분은 **이미지를 보고** 추론합니다.
+- 타입이 \`COMPONENT_SET\` 또는 \`MULTI_COMPONENT_SELECTION\`이면 variantInstances의 모든 항목을 한 MD 안의 상태/Variant로 정리하세요. 예: Default, Hover, Disabled, Focus, Pressed.
+- 버튼 컴포넌트는 상태별 토큰과 사용 규칙을 반드시 분리하세요. 예: Default/Hover/Disabled 각각 background, text, border, opacity, cursor/interaction.
 - Owner는 \`Design System Team\`, Status는 \`Draft\`, Last updated는 오늘 날짜로.
 - Figma 링크: \`figma://link/REPLACE_WITH_NODE_ID\` 그대로.
 - 디자인 토큰 이름은 컴포넌트명을 prefix로 사용 (예: 컴포넌트가 "Button"이면 \`color.button.primary.background\`).
@@ -775,66 +825,72 @@ ${template || '(템플릿 없음 — 직접 toast-notification.md 형식 따를 
         // 디버그 덤프
         try { fs.writeFileSync(path.join(imgDir, 'last-component-prompt.txt'), prompt); } catch (de) { /* */ }
 
-        const raw = await callClaudeCLI(prompt);
+        const raw = await callCodexCLI(prompt);
         try { fs.writeFileSync(path.join(imgDir, 'last-component-response.txt'), String(raw || '')); } catch (de) { /* */ }
 
         const jsonStr = extractJson(raw);
         if (!jsonStr) throw new Error('응답에서 JSON을 찾을 수 없습니다. 응답 일부: ' + String(raw).slice(0, 200));
         const parsed = JSON.parse(jsonStr);
-        let filename = String(parsed.filename || '').trim();
+        // repoSlug: GitHub 폴더명 + 파일명 (예: "input" → input/input.md)
+        const repoSlug = slugifyAscii(String(parsed.filename || '').trim().replace(/\.md$/i, ''), 'component');
         const componentName = String(parsed.componentName || component.name || '').trim();
-        const markdown = String(parsed.markdown || '');
-
-        // filename 안전화 — 프로젝트명 scope를 붙여 다른 프로젝트의 동일 컴포넌트명 충돌 방지
-        const projectName = String(component.projectName || component.fileName || component.pageName || 'figma-project').trim();
-        filename = componentScopedFilename(projectName, filename, componentName, component.fileKey);
-
-        // design-system/ 폴더에 저장 (없으면 생성)
-        if (!fs.existsSync(designDir)) fs.mkdirSync(designDir, { recursive: true });
-        const outPath = path.join(designDir, filename);
-        fs.writeFileSync(outPath, markdown, 'utf8');
-
-        // GitHub URL 계산 — 기본 저장소는 hy0909/designsystem
         const requestedBase = String(githubBase || '').replace(/\/+$/, '');
         const base = (!requestedBase || /PLACEHOLDER_OWNER|PLACEHOLDER_REPO/.test(requestedBase))
           ? COMPONENT_GITHUB_BASE
           : requestedBase;
-        const githubUrl = base ? `${base}/design-system/${filename}` : null;
+        const previewUrl = base ? `${base}/${repoSlug}/preview.png` : null;
+        const markdown = injectComponentPreview(String(parsed.markdown || ''), 'preview.png', componentName);
+
+        // 로컬 저장: design-system/{repoSlug}.md  (단순 slug명, 프로젝트 prefix 없음)
+        const localFilename = repoSlug + '.md';
+        if (!fs.existsSync(DESIGN_SYSTEM_DIR)) fs.mkdirSync(DESIGN_SYSTEM_DIR, { recursive: true });
+        const outPath = path.join(DESIGN_SYSTEM_DIR, localFilename);
+        // 파일 감시에서 중복 커밋 방지 — 직접 쓰기 전에 suppress
+        suppressWatchFor(localFilename, 4000);
+        fs.writeFileSync(outPath, markdown, 'utf8');
+
+        // GitHub URL: {base}/{repoSlug}/{repoSlug}.md  (예: .../input/input.md)
+        const githubUrl = base ? `${base}/${repoSlug}/${repoSlug}.md` : null;
 
         let githubPublish = { attempted: true, committed: false, pushed: false };
         let githubPublishError = null;
         try {
           githubPublish = Object.assign(
             { attempted: true },
-            publishComponentMdToGithub(filename, markdown, componentName)
+            publishComponentMdToGithub(repoSlug, markdown, componentName, componentImageBuffer)
           );
         } catch (pe) {
           githubPublishError = pe && pe.message ? pe.message : String(pe);
           console.error('[컴포넌트 MD GitHub 푸시 실패]', githubPublishError);
         }
 
-        // 디자인시스템.md 에 새 컴포넌트 섹션 자동 추가 (이미 같은 파일 링크가 있으면 skip)
+        // 디자인시스템.md 에 새 컴포넌트 섹션 자동 추가 (이미 같은 slug 링크가 있으면 skip)
         let designSystemUpdated = false;
         try {
           const dsPath = path.join(__dirname, '디자인시스템.md');
           if (fs.existsSync(dsPath)) {
             const ds = fs.readFileSync(dsPath, 'utf8');
-            if (!ds.includes('design-system/' + filename)) {
-              const block = `\n\n## ${componentName}\n\n- **상세 명세 (GitHub)**: [${componentName} 상세 명세](${githubUrl || 'https://github.com/PLACEHOLDER_OWNER/PLACEHOLDER_REPO/blob/main/design-system/' + filename})\n  - 로컬 사본: [design-system/${filename}](design-system/${filename})\n- _(자동 생성 — 디자인시스템.md의 일관성을 위해 항목 직접 보강 권장)_\n`;
+            const repoRelPath = `${repoSlug}/${repoSlug}.md`;
+            if (!ds.includes(repoRelPath) && !ds.includes('design-system/' + localFilename)) {
+              const fallbackUrl = `https://github.com/hy0909/designsystem/blob/main/${repoRelPath}`;
+              const block = `\n\n## ${componentName}\n\n- **컴포넌트 md (GitHub)**: [${componentName} 컴포넌트 md](${githubUrl || fallbackUrl})\n  - 로컬 사본: [design-system/${localFilename}](design-system/${localFilename})\n- _(자동 생성 — 디자인시스템.md의 일관성을 위해 항목 직접 보강 권장)_\n`;
               fs.appendFileSync(dsPath, block, 'utf8');
               designSystemUpdated = true;
             }
           }
         } catch (de) { /* skip */ }
 
-        console.log(`[컴포넌트 MD] ${filename} 저장 · 디자인시스템.md ${designSystemUpdated ? '갱신' : '건너뜀'} · GitHub ${githubPublish.pushed ? '푸시 완료' : (githubPublishError ? '푸시 실패' : '변경 없음')}`);
+        console.log(`[컴포넌트 MD] design-system/${localFilename} 저장 · GitHub ${githubPublish.pushed ? '푸시 완료' : (githubPublishError ? '푸시 실패' : '변경 없음')}`);
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
-          filename,
+          filename: localFilename,
+          repoSlug,
+          repoPath: `${repoSlug}/${repoSlug}.md`,
           componentName,
           markdown,
           githubUrl,
+          previewUrl,
           absolutePath: outPath,
           designSystemUpdated,
           githubPublish,
@@ -849,15 +905,186 @@ ${template || '(템플릿 없음 — 직접 toast-notification.md 형식 따를 
     return;
   }
 
+  // ── 컴포넌트 MD 업데이트 (Design Tokens 섹션만 새 컴포넌트 값으로 교체) ──
+  if (req.method === 'POST' && req.url === '/update-component-md') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { component, image, githubBase, targetSlug } = JSON.parse(body);
+        if (!component || !component.name) throw new Error('컴포넌트 정보가 없습니다.');
+
+        const imgDir = path.join(__dirname, 'logs');
+        let imgPath = null;
+        if (image) {
+          imgPath = path.join(imgDir, 'component-update-input.png');
+          try { fs.writeFileSync(imgPath, Buffer.from(image, 'base64')); } catch (e) { imgPath = null; }
+        }
+
+        // targetSlug가 전달되면 우선 사용, 없으면 컴포넌트명에서 추론
+        const guessSlug = targetSlug
+          ? slugifyAscii(String(targetSlug).trim(), 'component')
+          : slugifyAscii(
+              String(component.name || '').replace(/컴포넌트|component/gi, '').trim(),
+              'component'
+            );
+
+        // 저장소 pull
+        let existingMd = '';
+        let repoSlug = guessSlug;
+        let foundInRepo = false;
+        try {
+          ensureComponentRepo();
+          const candidatePath = path.join(COMPONENT_REPO_WORKDIR, repoSlug, repoSlug + '.md');
+          if (fs.existsSync(candidatePath)) {
+            existingMd = fs.readFileSync(candidatePath, 'utf8');
+            foundInRepo = true;
+          }
+        } catch (ge) {
+          console.warn('[업데이트] GitHub 저장소 접근 실패 — 로컬만 진행:', ge.message);
+        }
+
+        if (!foundInRepo) {
+          // 로컬 design-system/ 폴더에서도 탐색
+          const localDir = path.join(__dirname, 'design-system');
+          if (fs.existsSync(localDir)) {
+            const files = fs.readdirSync(localDir);
+            const match = files.find(f => f.toLowerCase().includes(repoSlug));
+            if (match) existingMd = fs.readFileSync(path.join(localDir, match), 'utf8');
+          }
+        }
+
+        const variantText = component.variantProperties
+          ? JSON.stringify(component.variantProperties, null, 2) : '(없음)';
+        const layersText = (component.layers || []).slice(0, 60)
+          .map(l => `${'  '.repeat(l.depth)}- ${l.type} "${l.name}" ${l.width}x${l.height}`)
+          .join('\n');
+        const textsText = (component.texts || []).slice(0, 40).join(' / ') || '(없음)';
+
+        const prompt = `당신은 시니어 디자인 시스템 엔지니어입니다.
+아래 기존 컴포넌트 MD 파일에서 **Design Tokens 섹션(또는 색상·크기·폰트 관련 테이블 섹션)만** 새 컴포넌트 데이터로 업데이트하세요.
+나머지 섹션(Overview, Anatomy, Variants, Interaction, A11y, Changelog 등)은 절대 수정하지 마세요.
+
+## 업데이트 대상 컴포넌트
+- **이름**: ${component.name}
+- **크기**: ${Math.round(component.width || 0)}x${Math.round(component.height || 0)}
+- **Variant 정의**:
+\`\`\`json
+${variantText}
+\`\`\`
+- **수집된 텍스트**: ${textsText}
+- **레이어 구조 (앞 60개)**:
+\`\`\`
+${layersText}
+\`\`\`
+${imgPath ? `- **컴포넌트 스크린샷 (반드시 Read 도구로 직접 열어보고 분석)**: @${imgPath}` : ''}
+
+## 기존 MD 파일
+\`\`\`md
+${existingMd || '(기존 파일 없음 — Design Tokens 섹션을 새로 작성)'}
+\`\`\`
+
+## 작업 규칙
+- Design Tokens 섹션 테이블에서 배경색, 텍스트색, 보더색, 보더-radius, 폰트 크기 등을 실제 Figma 컴포넌트 값으로 교체.
+- 컴포넌트 스크린샷 이미지가 있으면 색상·스타일 값을 이미지에서 직접 읽어 최우선 적용.
+- 토큰 이름 prefix는 컴포넌트명 기반으로 유지 (예: color.input.border.default).
+- 기존 파일이 없으면 Design Tokens 섹션만 새로 작성하고 나머지는 "(기존 내용 없음)" 플레이스홀더.
+
+## 출력 형식 (JSON 객체 1개만 — 다른 텍스트 절대 금지)
+첫 글자 \`{\`, 마지막 글자 \`}\`. 코드펜스 금지.
+{
+  "repoSlug": "${repoSlug}",
+  "componentName": "Component Name",
+  "markdown": "전체 MD 내용 (줄바꿈은 \\n 이스케이프)"
+}`;
+
+        try { fs.writeFileSync(path.join(imgDir, 'last-update-prompt.txt'), prompt); } catch (de) { /* */ }
+
+        const raw = await callCodexCLI(prompt);
+        try { fs.writeFileSync(path.join(imgDir, 'last-update-response.txt'), String(raw || '')); } catch (de) { /* */ }
+
+        const jsonStr = extractJson(raw);
+        if (!jsonStr) throw new Error('응답에서 JSON을 찾을 수 없습니다. 응답 일부: ' + String(raw).slice(0, 200));
+        const parsed = JSON.parse(jsonStr);
+        const updatedMarkdown = String(parsed.markdown || '');
+        const componentName = String(parsed.componentName || component.name || '').trim();
+        repoSlug = slugifyAscii(String(parsed.repoSlug || repoSlug), repoSlug);
+
+        // 로컬 design-system/{repoSlug}.md 에 저장
+        if (!fs.existsSync(DESIGN_SYSTEM_DIR)) fs.mkdirSync(DESIGN_SYSTEM_DIR, { recursive: true });
+        const localFilename = repoSlug + '.md';
+        suppressWatchFor(localFilename, 4000);
+        fs.writeFileSync(path.join(DESIGN_SYSTEM_DIR, localFilename), updatedMarkdown, 'utf8');
+
+        // GitHub URL
+        const requestedBase = String(githubBase || '').replace(/\/+$/, '');
+        const base = (!requestedBase || /PLACEHOLDER_OWNER|PLACEHOLDER_REPO/.test(requestedBase))
+          ? COMPONENT_GITHUB_BASE : requestedBase;
+        const githubUrl = base ? `${base}/${repoSlug}/${repoSlug}.md` : null;
+
+        let githubPublish = { attempted: true, committed: false, pushed: false };
+        let githubPublishError = null;
+        try {
+          githubPublish = Object.assign(
+            { attempted: true },
+            updateComponentMdTokensInGithub(repoSlug, updatedMarkdown, componentName)
+          );
+        } catch (pe) {
+          githubPublishError = pe && pe.message ? pe.message : String(pe);
+          console.error('[컴포넌트 MD 업데이트 GitHub 푸시 실패]', githubPublishError);
+        }
+
+        console.log(`[컴포넌트 MD 업데이트] ${repoSlug}/${repoSlug}.md · GitHub ${githubPublish.pushed ? '푸시 완료' : (githubPublishError ? '실패' : '변경 없음')}`);
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          filename: localFilename,
+          repoSlug,
+          repoPath: `${repoSlug}/${repoSlug}.md`,
+          componentName,
+          markdown: updatedMarkdown,
+          githubUrl,
+          foundInRepo,
+          githubPublish,
+          githubPublishError,
+        }));
+      } catch (e) {
+        console.error('[컴포넌트 MD 업데이트 오류]', e.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
   if (req.method === 'POST' && req.url === '/make-exception-page') {
     let body = '';
     req.on('data', chunk => body += chunk);
     req.on('end', async () => {
       try {
-        const { prdContent, reqContent } = JSON.parse(body || '{}');
+        const { prdContent, reqContent, pageTypes, frameImage, frameName } = JSON.parse(body || '{}');
+        const selectedTypes = Array.isArray(pageTypes) && pageTypes.length
+          ? pageTypes.filter(t => t === 'empty' || t === 'error')
+          : ['empty', 'error'];
+        if (!selectedTypes.length) throw new Error('제작할 페이지를 1개 이상 선택하세요.');
+        const wantsEmpty = selectedTypes.includes('empty');
+        const wantsError = selectedTypes.includes('error');
         const designSystem = loadDesignSystem();
+
+        // 선택 프레임 이미지 저장 (빈 상태 분석용)
+        const imgDir = path.join(__dirname, 'logs');
+        let frameImgPath = null;
+        if (frameImage) {
+          frameImgPath = path.join(imgDir, 'exception-page-frame.png');
+          try { fs.writeFileSync(frameImgPath, Buffer.from(frameImage, 'base64')); } catch (e) { frameImgPath = null; }
+        }
+
         const prompt = `당신은 시니어 UX 기획자이자 디자인시스템 설계자입니다.
 PRD/요구사항 문서와 디자인시스템을 바탕으로 Figma에 그릴 "예외 케이스 페이지" 구성을 만드세요.
+
+## 선택된 화면 정보
+- 화면명: ${frameName || '(없음)'}
+${frameImgPath ? `- 화면 스크린샷 (반드시 Read 도구로 직접 열어보고 분석): @${frameImgPath}` : ''}
 
 ## PRD
 ${prdContent || '(첨부 없음)'}
@@ -868,46 +1095,126 @@ ${reqContent || '(첨부 없음)'}
 ## 디자인시스템
 ${designSystem || '(디자인시스템 문서 없음)'}
 
+## 제작할 페이지
+${wantsEmpty ? '- 데이터없는 페이지: 조회 결과가 없거나 검색/필터 결과가 0건인 상황' : ''}
+${wantsError ? '- 에러케이스 페이지: 페이지 오류, 데이터 로딩 실패, 입력/액션 실패, 네트워크 장애 상황' : ''}
+
 ## 작성 규칙
 - 실제 제품 페이지에 들어갈 수 있는 예외 케이스 화면/상태를 구성하세요.
-- 로그인/권한/입력검증/네트워크/빈 상태/서버 오류/업로드/결제/삭제 확인 등 문서에 맞는 케이스를 우선하세요.
+- 위 "제작할 페이지"에 명시된 페이지만 생성하세요.
 - 디자인시스템에 있는 컴포넌트 이름이나 패턴이 보이면 component 필드에 반영하세요.
-- 너무 많지 않게 섹션 3~5개, 각 섹션 item 2~4개로 구성하세요.
-- 문서가 없으면 범용 SaaS/관리자 화면 기준으로 작성하세요.
+- 페이지마다 섹션 3~5개, 각 섹션 item 2~4개로 구성하세요.
+- 문서/이미지가 없으면 범용 SaaS/관리자 화면 기준으로 작성하세요.
+- title은 선택된 페이지명 그대로: 데이터없는 페이지는 "데이터없는 페이지", 에러케이스 페이지는 "에러케이스 페이지".
 
-## 출력 형식
-JSON 객체 1개만 출력하세요. 코드펜스 금지.
+### 데이터없는 페이지 — emptyState 필드 필수 작성 규칙
+화면 이미지가 있으면 이미지를 직접 보고 분석하여 아래를 채우세요:
+- screenTitle: 화면의 실제 페이지 제목 (예: "위험 알림 목록")
+- icon: 화면의 핵심 개념을 나타내는 단일 이모지 (예: 🔔, 📋, 📦)
+- mainMessage: "○○이 없어요." 형식 (화면 맥락에 맞게, 예: "위험 알림이 없어요.")
+- subMessage: 1줄 보조 설명 (없으면 null)
+- ctaLabel: CTA 버튼 텍스트 (없으면 null, 있으면 예: "알림 등록하기")
+- tabs: 화면에 탭 바가 있으면 탭 라벨 배열 (없으면 [])
+- tableHeaders: 화면에 테이블이 있으면 헤더 컬럼명 배열 (없으면 [])
+- 디자인시스템의 No Data / Empty State 컴포넌트 정의를 최우선 반영하세요.
+
+## 출력 형식 — JSON 객체 1개만, 코드펜스 금지
 {
-  "page": {
-    "title": "예외 케이스",
-    "subtitle": "PRD와 디자인시스템 기반 예외 상태 페이지",
-    "sections": [
-      {
-        "title": "입력 검증",
-        "description": "폼 입력에서 발생하는 오류 상태",
-        "items": [
-          {
-            "name": "필수값 누락",
-            "trigger": "필수 입력값 없이 저장 버튼 클릭",
-            "expected": "필드 하단 에러 메시지와 토스트를 표시",
-            "component": "Input, Toast"
-          }
-        ]
-      }
-    ]
-  }
+  "pages": [
+    {
+      "type": "empty",
+      "title": "데이터없는 페이지",
+      "subtitle": "PRD와 디자인시스템 기반 빈 상태 페이지",
+      "emptyState": {
+        "screenTitle": "위험 알림 목록",
+        "icon": "🔔",
+        "mainMessage": "위험 알림이 없어요.",
+        "subMessage": "등록된 위험 알림이 없습니다.",
+        "ctaLabel": null,
+        "tabs": ["전체", "주의", "위험", "사고발생"],
+        "tableHeaders": ["위험 단계", "현장 사진", "분류", "위치", "시간", "상태", "보고서"]
+      },
+      "sections": [
+        {
+          "title": "데이터 없음",
+          "description": "조회 결과가 0건인 상태",
+          "items": [
+            {
+              "name": "최초 데이터 없음",
+              "trigger": "등록된 데이터가 0건인 상태로 페이지 진입",
+              "expected": "빈 상태 메시지와 다음 액션 CTA를 표시",
+              "component": "Empty State, Button"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "title": "에러케이스 페이지",
+      "subtitle": "PRD와 디자인시스템 기반 오류 상태 페이지",
+      "sections": [
+        {
+          "title": "데이터 로딩 실패",
+          "description": "API 또는 네트워크 실패로 데이터를 불러오지 못한 상태",
+          "items": [
+            {
+              "name": "목록 로딩 실패",
+              "trigger": "목록 API 요청 실패",
+              "expected": "오류 메시지와 재시도 버튼을 표시",
+              "component": "Alert, Button"
+            }
+          ]
+        }
+      ]
+    }
+  ]
 }`;
 
-        const raw = await callClaudeCLI(prompt);
+        const raw = await callCodexCLI(prompt);
         const jsonStr = extractJson(raw);
         if (!jsonStr) throw new Error('응답에서 JSON을 찾을 수 없습니다. 응답 일부: ' + String(raw).slice(0, 200));
         const parsed = JSON.parse(jsonStr);
-        const page = parsed.page || parsed;
-        page.title = page.title || '예외 케이스';
-        page.subtitle = page.subtitle || 'PRD와 디자인시스템 기반 예외 상태 페이지';
-        page.sections = Array.isArray(page.sections) ? page.sections : [];
+        let pages = Array.isArray(parsed.pages)
+          ? parsed.pages
+          : (parsed.page ? [parsed.page] : (parsed.title ? [parsed] : []));
+        pages = pages
+          .filter(Boolean)
+          .map((page, idx) => {
+            const type = page.type === 'empty' || /데이터\s*없|Empty|No Results/i.test(page.title || '')
+              ? 'empty'
+              : 'error';
+            return {
+              type,
+              title: page.title || (type === 'empty' ? '데이터없는 페이지' : '에러케이스 페이지'),
+              subtitle: page.subtitle || (type === 'empty' ? 'PRD와 디자인시스템 기반 빈 상태 페이지' : 'PRD와 디자인시스템 기반 오류 상태 페이지'),
+              sections: Array.isArray(page.sections) ? page.sections : [],
+              emptyState: page.emptyState || null,
+              _order: idx,
+            };
+          })
+          .filter(page => selectedTypes.includes(page.type));
+
+        if (wantsEmpty && !pages.some(page => page.type === 'empty')) {
+          pages.unshift({
+            type: 'empty',
+            title: '데이터없는 페이지',
+            subtitle: 'PRD와 디자인시스템 기반 빈 상태 페이지',
+            sections: [],
+          });
+        }
+        if (wantsError && !pages.some(page => page.type === 'error')) {
+          pages.push({
+            type: 'error',
+            title: '에러케이스 페이지',
+            subtitle: 'PRD와 디자인시스템 기반 오류 상태 페이지',
+            sections: [],
+          });
+        }
+        pages.sort((a, b) => selectedTypes.indexOf(a.type) - selectedTypes.indexOf(b.type));
+        pages = pages.map(({ _order, ...page }) => page);
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ page }));
+        res.end(JSON.stringify({ page: pages[0] || null, pages }));
       } catch (e) {
         console.error('[예외 페이지 제작 오류]', e.message);
         res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -963,7 +1270,7 @@ JSON 객체 1개만 출력하세요. 코드펜스 금지.
           fs.writeFileSync(path.join(imgDir, 'last-ia-prompt.txt'), prompt);
         } catch (de) { /* */ }
 
-        const raw = await callClaudeCLI(prompt);
+        const raw = await callCodexCLI(prompt);
         try {
           fs.writeFileSync(path.join(imgDir, 'last-ia-response.txt'), String(raw || ''));
         } catch (de) { /* */ }
@@ -1051,7 +1358,7 @@ JSON 객체 1개만 출력하세요. 코드펜스 금지.
           fs.writeFileSync(path.join(dbgDir, 'last-prompt.txt'), prompt);
         } catch (de) { /* 무시 */ }
 
-        const raw = await callClaudeCLI(prompt);
+        const raw = await callCodexCLI(prompt);
 
         try {
           fs.writeFileSync(path.join(__dirname, 'logs', 'last-response.txt'), String(raw || ''));
@@ -1095,7 +1402,7 @@ JSON 객체 1개만 출력하세요. 코드펜스 금지.
         const pad = n => String(n).padStart(2, '0');
         const meta = {
           model: MODEL,
-          tool: 'Claude Code CLI (기능 명세 생성기)',
+          tool: 'Codex CLI (기능 생성기)',
           os: `${process.platform} ${os.release()} (${process.arch})`,
           node: process.version,
           generatedAt: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`,
@@ -1115,8 +1422,55 @@ JSON 객체 1개만 출력하세요. 코드펜스 금지.
   res.end();
 });
 
+// ── design-system/ 폴더 자동 감시 → GitHub 자동 커밋 ──
+const _watchSuppressMap = {};   // filename → suppress-until timestamp
+const _watchDebounceMap = {};   // filename → setTimeout ID
+
+function suppressWatchFor(filename, ms) {
+  _watchSuppressMap[filename] = Date.now() + ms;
+}
+
+function syncLocalMdToGithub(filename) {
+  const slug = filename.replace(/\.md$/i, '');
+  const srcPath = path.join(DESIGN_SYSTEM_DIR, filename);
+  if (!fs.existsSync(srcPath)) return;
+  const markdown = fs.readFileSync(srcPath, 'utf8');
+  try {
+    const result = publishComponentMdToGithub(slug, markdown, slug);
+    if (result.committed) {
+      console.log(`[자동 커밋] design-system/${filename} → GitHub ${slug}/${slug}.md 푸시 완료`);
+    } else {
+      console.log(`[자동 커밋] design-system/${filename} — 변경 없음 (skip)`);
+    }
+  } catch (e) {
+    console.error(`[자동 커밋 실패] design-system/${filename}:`, e.message);
+  }
+}
+
+function startDesignSystemWatcher() {
+  if (!fs.existsSync(DESIGN_SYSTEM_DIR)) {
+    fs.mkdirSync(DESIGN_SYSTEM_DIR, { recursive: true });
+  }
+  try {
+    fs.watch(DESIGN_SYSTEM_DIR, { persistent: true }, (eventType, filename) => {
+      if (!filename || !filename.endsWith('.md')) return;
+      // suppress 기간 중이면 스킵 (서버가 직접 쓴 파일)
+      if (_watchSuppressMap[filename] && Date.now() < _watchSuppressMap[filename]) return;
+      if (_watchDebounceMap[filename]) clearTimeout(_watchDebounceMap[filename]);
+      _watchDebounceMap[filename] = setTimeout(() => {
+        delete _watchDebounceMap[filename];
+        syncLocalMdToGithub(filename);
+      }, 3000);
+    });
+    console.log(`👁  design-system/ 폴더 감시 중 — .md 저장 시 GitHub 자동 커밋`);
+  } catch (e) {
+    console.warn('[파일 감시 오류]', e.message);
+  }
+}
+
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`✅ 기능 명세 브릿지 서버 실행 중 — http://localhost:${PORT}`);
-  console.log('   Claude Code 로그인 세션을 사용합니다. (별도 API 키 불필요)');
+  console.log('   Codex 로그인 세션을 사용합니다. (별도 API 키 불필요)');
   console.log('   Figma 플러그인에서 기능 생성 버튼을 눌러주세요.');
+  startDesignSystemWatcher();
 });

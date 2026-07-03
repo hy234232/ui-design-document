@@ -273,7 +273,7 @@
 <div class="header">
   <div class="header-left">
     <h1>📄핸드오프문서 자동생성기</h1>
-    <p>Figma 프레임 기반 화면 흐름 · 기능 명세 · 예외 케이스 자동 생성</p>
+    <p>Figma 프레임 기반 화면 흐름 · 화면 정의서 · 예외 케이스 자동 생성</p>
   </div>
   <div class="server-status">
     <div class="server-dot checking" id="serverDot"></div>
@@ -283,9 +283,8 @@
 
 <div class="tab-bar">
   <button class="tab active" data-tab="flow" onclick="switchTab('flow')">화면</button>
-  <button class="tab" data-tab="spec" onclick="switchTab('spec')">기능 명세</button>
   <button class="tab" data-tab="exception" onclick="switchTab('exception')">예외 케이스</button>
-  <button class="tab" data-tab="component" onclick="switchTab('component')">컴포넌트 명세</button>
+  <button class="tab" data-tab="component" onclick="switchTab('component')">컴포넌트 md</button>
 </div>
 
 <div class="doc-section" id="docSection">
@@ -328,12 +327,37 @@
   <!-- Tab: 화면 -->
   <div class="tab-panel" data-panel="flow">
     <div class="subtab-bar">
-      <button class="subtab active" data-screen-tab="flow" onclick="switchScreenTab('flow')">플로우</button>
+      <button class="subtab active" data-screen-tab="spec" onclick="switchScreenTab('spec')">화면정의서</button>
+      <button class="subtab" data-screen-tab="flow" onclick="switchScreenTab('flow')">플로우</button>
       <button class="subtab" data-screen-tab="structure" onclick="switchScreenTab('structure')">구조</button>
       <button class="subtab" data-screen-tab="size" onclick="switchScreenTab('size')">사이즈</button>
     </div>
 
-    <div class="screen-subpanel" data-screen-panel="flow">
+    <div class="screen-subpanel" data-screen-panel="spec">
+      <div class="checkbox-row">
+        <label for="optOverview">
+          <input type="checkbox" id="optOverview" checked onchange="onToggleSections()" />
+          🖥️ 화면 설명
+        </label>
+        <label for="optCommon" title="GNB·사이드바·설정·프로필 등 공통 영역을 명세 대상에 포함">
+          <input type="checkbox" id="optCommon" />
+          🧱 공통기능 읽기
+        </label>
+      </div>
+      <div class="accum-row">
+        <label for="optAccumulate">
+          <input type="checkbox" id="optAccumulate" checked />
+          🔁 이전 분석 누적 — 새로 등장한 것만 명세 <span style="opacity:.7;">(누적 <span id="histCount">0</span>개)</span>
+        </label>
+        <button type="button" onclick="resetHistory()" title="이 파일의 누적 기록 초기화">초기화</button>
+      </div>
+      <div class="action-area">
+        <button class="btn btn-primary" id="generateSpecBtn" onclick="generate('spec')">화면 정의서 생성</button>
+        <button class="btn btn-icon" onclick="copyAll()" id="copyAllBtn" title="전체 복사" style="display:none">복사</button>
+      </div>
+    </div>
+
+    <div class="screen-subpanel" data-screen-panel="flow" hidden>
       <div class="flow-color-row">
         <input type="color" id="arrowColor" value="#ff37e8" oninput="onColorChange('color')" />
         <input type="text" id="arrowHex" value="#FF37E8" maxlength="7" oninput="onColorChange('hex')" />
@@ -402,31 +426,6 @@
     </div>
   </div>
 
-  <!-- Tab 2: 기능 명세 생성 -->
-  <div class="tab-panel" data-panel="spec" hidden>
-    <div class="checkbox-row">
-      <label for="optOverview">
-        <input type="checkbox" id="optOverview" checked onchange="onToggleSections()" />
-        🖥️ 화면 설명
-      </label>
-      <label for="optCommon" title="GNB·사이드바·설정·프로필 등 공통 영역을 명세 대상에 포함">
-        <input type="checkbox" id="optCommon" />
-        🧱 공통기능 읽기
-      </label>
-    </div>
-    <div class="accum-row">
-      <label for="optAccumulate">
-        <input type="checkbox" id="optAccumulate" checked />
-        🔁 이전 분석 누적 — 새로 등장한 것만 명세 <span style="opacity:.7;">(누적 <span id="histCount">0</span>개)</span>
-      </label>
-      <button type="button" onclick="resetHistory()" title="이 파일의 누적 기록 초기화">초기화</button>
-    </div>
-    <div class="action-area">
-      <button class="btn btn-primary" id="generateSpecBtn" onclick="generate('spec')">기능 명세 생성</button>
-      <button class="btn btn-icon" onclick="copyAll()" id="copyAllBtn" title="전체 복사" style="display:none">복사</button>
-    </div>
-  </div>
-
   <!-- Tab 3: 예외 케이스 생성 -->
   <div class="tab-panel" data-panel="exception" hidden>
     <div class="subtab-bar">
@@ -468,13 +467,25 @@
       <div class="hint-text">
         PRD 첨부 내용과 디자인시스템.md를 기준으로 예외 케이스 페이지를 캔버스에 제작합니다. PRD 첨부는 선택사항입니다.
       </div>
+      <div class="checkbox-row">
+        <label for="optMakeEmptyPage">
+          <input type="checkbox" id="optMakeEmptyPage" checked />
+          데이터없는 페이지
+        </label>
+      </div>
+      <div class="checkbox-row">
+        <label for="optMakeErrorPage">
+          <input type="checkbox" id="optMakeErrorPage" checked />
+          에러케이스 페이지
+        </label>
+      </div>
       <div class="action-area">
         <button class="btn btn-primary" id="createExceptionPageBtn" onclick="createExceptionPage()">페이지 제작</button>
       </div>
     </div>
   </div>
 
-  <!-- Tab: 🧱 컴포넌트 명세 -->
+  <!-- Tab: 🧱 컴포넌트 md -->
   <div class="tab-panel" data-panel="component" hidden>
     <div style="background:#252525;border:1px solid #333;border-radius:8px;padding:12px 14px;display:flex;flex-direction:column;gap:10px;">
       <div class="opt-title">GitHub Repo (링크 생성용)</div>
@@ -486,17 +497,17 @@
       </div>
     </div>
 
-    <div class="action-area">
-      <button class="btn btn-primary" id="extractCompBtn" onclick="extractComponentMd()">MD 파일 추출</button>
+    <div class="action-area" style="display:flex;gap:8px;">
+      <button class="btn btn-primary" id="extractCompBtn" onclick="extractComponentMd()" style="flex:1;">MD 파일 등록</button>
+      <button class="btn" id="updateCompBtn" onclick="updateComponentMd()" style="flex:1;background:#2a2a3a;border:1px solid #5a3da0;color:#c4b1ff;">MD 파일 업데이트</button>
     </div>
 
     <div class="hint-text">
       <b>사용 방법</b><br>
-      • Figma에서 <b>COMPONENT 또는 COMPONENT_SET</b> 을 1개 선택합니다 (예: 토스트 컴포넌트, 버튼 변형 세트).<br>
-      • 추출 버튼 클릭 → Claude가 컴포넌트를 분석해 toast-notification.md 형식으로 명세 생성.<br>
-      • 결과 파일: <code style="background:#1a1a1a;padding:1px 4px;border-radius:3px;">design-system/{컴포넌트명-slug}.md</code><br>
-      • 디자인시스템.md에 자동으로 새 컴포넌트 섹션 + GitHub 링크가 추가됩니다.<br>
-      • 결과 영역에서 파일 이름을 클릭하면 GitHub URL이 열립니다.
+      • Figma에서 <b>COMPONENT 또는 COMPONENT_SET</b> 을 1개 선택합니다 (예: Input 컴포넌트, Button 변형 세트).<br>
+      • <b>MD 파일 추출</b>: Codex가 전체 명세를 새로 생성 → GitHub <code style="background:#1a1a1a;padding:1px 4px;border-radius:3px;">{컴포넌트명}/{컴포넌트명}.md</code> 로 저장.<br>
+      • <b>MD 파일 업데이트</b>: 이미 존재하는 MD의 Design Tokens 섹션(색상·크기·폰트)만 현재 Figma 값으로 갱신·푸시.<br>
+      • 디자인시스템.md에 자동으로 새 컴포넌트 섹션 + GitHub 링크가 추가됩니다.
     </div>
   </div>
 
@@ -520,7 +531,7 @@
     <div class="empty-state">
       <div class="empty-icon">🖼️</div>
       <div class="empty-title">결과 영역</div>
-      <div class="empty-sub">기능 명세 또는 예외 케이스 생성 시 결과가 여기에 표시됩니다.</div>
+      <div class="empty-sub">화면 정의서 또는 예외 케이스 생성 시 결과가 여기에 표시됩니다.</div>
     </div>
   </div>
 </div>
@@ -538,12 +549,14 @@
   let lastSelectionBounds = null;
   let lastSelectionNodeIds = [];
   let lastPreviousFeatures = [];
+  let lastFrameData = [];   // 최근 selection-data 프레임 배열 (이미지 포함)
   const docs = { prd: null, req: null };
 
   // ── 탭 전환 ──
   function switchTab(name) {
     document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
     document.querySelectorAll('.tab-panel').forEach(p => p.hidden = (p.dataset.panel !== name));
+    if (name === 'flow') switchScreenTab('spec');
   }
 
   function switchScreenTab(name) {
@@ -562,7 +575,8 @@
 
   function placeResultsForTab(tabName) {
     const results = document.getElementById('results');
-    const panel = document.querySelector(`.tab-panel[data-panel="${tabName}"]`);
+    const panelName = tabName === 'spec' ? 'flow' : tabName;
+    const panel = document.querySelector(`.tab-panel[data-panel="${panelName}"]`);
     if (results && panel && results.parentElement !== panel) panel.appendChild(results);
   }
 
@@ -802,7 +816,7 @@
     }
     try {
       setStatus('이미지 처리 중...', 'loading');
-      // 긴 변 1600px로 리사이즈해 전송 — Claude vision은 1600px 정도면 충분
+      // 긴 변 1600px로 리사이즈해 전송 — Codex vision은 1600px 정도면 충분
       const r = await resizeImageToBase64(file, 1600);
       setIAImage(r.b64, r.dataUrl, r);
     } catch (e) {
@@ -879,38 +893,107 @@
     return data;
   }
 
-  // ── 컴포넌트 명세 추출 ──
+  // ── 컴포넌트 md 추출 ──
   async function extractComponentMd() {
     await checkServer();
     if (!serverOnline) { setStatus('로컬 서버가 실행 중이지 않습니다.', 'error'); return; }
     placeResultsForTab('component');
     const btn = document.getElementById('extractCompBtn');
     btn.disabled = true;
+    document.getElementById('updateCompBtn').disabled = true;
     setStatus('선택된 컴포넌트 분석 중...', 'loading');
     Progress.begin('컴포넌트 구조 분석', 0, 10, 3, true);
+    window._componentMdMode = 'extract';
+    parent.postMessage({ pluginMessage: { type: 'get-component-data' } }, '*');
+  }
+
+  async function updateComponentMd() {
+    await checkServer();
+    if (!serverOnline) { setStatus('로컬 서버가 실행 중이지 않습니다.', 'error'); return; }
+    placeResultsForTab('component');
+    document.getElementById('updateCompBtn').disabled = true;
+    setStatus('저장소 MD 목록 조회 중...', 'loading');
+    try {
+      const data = await safeJsonFetch(SERVER + '/list-component-mds');
+      const files = data.files || [];
+      if (!files.length) {
+        setStatus('등록된 MD 파일이 없습니다. 먼저 MD 파일 등록을 실행하세요.', 'error');
+        document.getElementById('updateCompBtn').disabled = false;
+        return;
+      }
+      setStatus(`MD 파일 ${files.length}개 발견 — 업데이트할 파일을 선택하세요.`, 'success');
+      renderMdFilePicker(files);
+    } catch (e) {
+      setStatus('목록 조회 실패: ' + e.message, 'error');
+      document.getElementById('updateCompBtn').disabled = false;
+    }
+  }
+
+  function renderMdFilePicker(files) {
+    const container = document.getElementById('results');
+    const rows = files.map(f => {
+      const label = f.slug;
+      const badge = f.source === 'github'
+        ? `<span style="font-size:10px;background:#1a2a1a;color:#86efac;border:1px solid #4ade80;border-radius:4px;padding:1px 5px;">GitHub</span>`
+        : `<span style="font-size:10px;background:#2a2a2a;color:#9ca3af;border:1px solid #444;border-radius:4px;padding:1px 5px;">로컬</span>`;
+      const link = f.githubUrl
+        ? `<a href="${esc(f.githubUrl)}" target="_blank" rel="noopener" style="color:#6b7280;font-size:11px;margin-left:6px;">↗</a>` : '';
+      return `<div onclick="selectMdAndUpdate('${esc(f.slug)}')" style="display:flex;align-items:center;gap:8px;padding:9px 12px;border-radius:6px;cursor:pointer;border:1px solid #333;background:#1e1e1e;transition:background .15s;"
+        onmouseover="this.style.background='#2a2a3a'" onmouseout="this.style.background='#1e1e1e'">
+        <span style="font-size:13px;">📄</span>
+        <span style="flex:1;font-size:12px;font-weight:600;color:#e0e0e0;">${esc(label)}</span>
+        ${badge}
+        <span style="font-size:11px;color:#6b7280;">${esc(f.repoPath)}</span>
+        ${link}
+      </div>`;
+    }).join('');
+    container.innerHTML = `
+      <div style="padding:4px 0 8px;">
+        <div style="font-size:11px;color:#9ca3af;margin-bottom:8px;">업데이트할 파일을 클릭하세요 — 현재 Figma 선택 컴포넌트의 Design Tokens으로 갱신됩니다.</div>
+        <div style="display:flex;flex-direction:column;gap:6px;">${rows}</div>
+      </div>`;
+  }
+
+  async function selectMdAndUpdate(slug) {
+    await checkServer();
+    if (!serverOnline) { setStatus('로컬 서버가 실행 중이지 않습니다.', 'error'); return; }
+    document.getElementById('extractCompBtn').disabled = true;
+    document.getElementById('updateCompBtn').disabled = true;
+    setStatus('컴포넌트 데이터 수집 중...', 'loading');
+    Progress.begin('컴포넌트 구조 분석', 0, 10, 3, true);
+    window._componentMdMode = 'update';
+    window._pendingUpdateSlug = slug;
     parent.postMessage({ pluginMessage: { type: 'get-component-data' } }, '*');
   }
 
   async function onComponentDataReceived(payload) {
     const githubBase = (document.getElementById('compGithubBase').value || '').trim().replace(/\/+$/, '');
+    const isUpdate = window._componentMdMode === 'update';
+    const endpoint = isUpdate ? '/update-component-md' : '/extract-component-md';
+    const phaseLabel = isUpdate ? 'Codex가 토큰 업데이트 중' : 'Codex가 명세 생성 중';
     try {
-      setStatus('Claude가 컴포넌트 명세 생성 중...', 'loading');
-      Progress.begin('Claude가 명세 생성 중', 10, 92, 30, false);
-      const data = await safeJsonFetch(SERVER + '/extract-component-md', {
+      setStatus(isUpdate ? 'Codex가 Design Tokens 업데이트 중...' : 'Codex가 컴포넌트 md 생성 중...', 'loading');
+      Progress.begin(phaseLabel, 10, 92, isUpdate ? 20 : 30, false);
+      const reqBody = {
+        component: payload.component,
+        image: payload.image,
+        githubBase: githubBase,
+      };
+      if (isUpdate && window._pendingUpdateSlug) {
+        reqBody.targetSlug = window._pendingUpdateSlug;
+      }
+      const data = await safeJsonFetch(SERVER + endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          component: payload.component,
-          image: payload.image,
-          githubBase: githubBase,
-        }),
+        body: JSON.stringify(reqBody),
       });
       Progress.finish('완료');
       const pushText = data.githubPublishError
         ? ' · GitHub 푸시 실패'
         : (data.githubPublish && data.githubPublish.pushed ? ' · GitHub 푸시 완료' : ' · GitHub 변경 없음');
-      setStatus(`✅ ${data.filename} 저장됨${pushText}`, data.githubPublishError ? 'error' : 'success');
-      renderComponentResult(data);
+      const actionLabel = isUpdate ? '업데이트됨' : '저장됨';
+      setStatus(`✅ ${data.repoPath || data.filename} ${actionLabel}${pushText}`, data.githubPublishError ? 'error' : 'success');
+      renderComponentResult(data, isUpdate);
       parent.postMessage({ pluginMessage: {
         type: 'create-md-shortcut',
         url: data.githubUrl,
@@ -924,26 +1007,38 @@
       setStatus('오류: ' + e.message, 'error');
     }
     document.getElementById('extractCompBtn').disabled = false;
+    document.getElementById('updateCompBtn').disabled = false;
+    window._componentMdMode = null;
+    window._pendingUpdateSlug = null;
   }
 
-  function renderComponentResult(data) {
+  function renderComponentResult(data, isUpdate) {
     const container = document.getElementById('results');
     const fileUrl = data.githubUrl || ('file://' + (data.absolutePath || ''));
+    const repoPath = data.repoPath || ('design-system/' + data.filename);
     const preview = (data.markdown || '').slice(0, 800);
     const publishNote = data.githubPublishError
       ? `<div class="task-text" style="opacity:.8;font-size:11px;color:#ff9b9b;">GitHub 푸시 실패: ${esc(data.githubPublishError)}</div>`
       : `<div class="task-text" style="opacity:.7;font-size:11px;">GitHub ${data.githubPublish && data.githubPublish.pushed ? '커밋·푸시 완료' : '변경 없음'}</div>`;
+    const actionBadge = isUpdate
+      ? `<span style="font-size:10px;background:#2a3a2a;color:#86efac;border:1px solid #4ade80;border-radius:4px;padding:1px 6px;margin-left:6px;">토큰 업데이트</span>`
+      : `<span style="font-size:10px;background:#2a2a3a;color:#c4b1ff;border:1px solid #5a3da0;border-radius:4px;padding:1px 6px;margin-left:6px;">신규 추출</span>`;
+    const foundNote = isUpdate && data.foundInRepo === false
+      ? `<div class="task-text" style="opacity:.75;font-size:11px;color:#fbbf24;">⚠️ 저장소에 기존 파일 없음 — 새로 생성했습니다.</div>` : '';
     container.innerHTML = `
       <div class="feature-card" style="border-left:3px solid #c4b1ff;">
         <div class="feature-header">
           <span class="feature-icon">🧱</span>
           <a href="${esc(fileUrl)}" target="_blank" rel="noopener" style="font-size:13px;color:#c4b1ff;text-decoration:none;font-weight:700;">
-            ${esc(data.componentName || data.filename)} 🔗
+            ${esc(data.componentName || data.filename)}
           </a>
+          ${actionBadge}
+          <a href="${esc(fileUrl)}" target="_blank" rel="noopener" style="margin-left:4px;color:#9ca3af;font-size:12px;">🔗</a>
         </div>
         <div class="feature-body">
-          <div class="task-text" style="opacity:.85;">📂 <code style="background:#1a1a1a;padding:1px 4px;border-radius:3px;">design-system/${esc(data.filename)}</code></div>
-          <div class="task-text" style="opacity:.7;font-size:11px;">디자인시스템.md에 ${data.designSystemUpdated ? '✅ 링크 추가됨' : '⚠️ 링크 추가 안됨'}</div>
+          <div class="task-text" style="opacity:.85;">📂 <code style="background:#1a1a1a;padding:1px 4px;border-radius:3px;">${esc(repoPath)}</code></div>
+          ${data.designSystemUpdated !== undefined ? `<div class="task-text" style="opacity:.7;font-size:11px;">디자인시스템.md에 ${data.designSystemUpdated ? '✅ 링크 추가됨' : '⚠️ 링크 추가 안됨'}</div>` : ''}
+          ${foundNote}
           ${publishNote}
           <details style="margin-top:8px;">
             <summary style="cursor:pointer;font-size:11px;color:#9ca3af;">📝 MD 미리보기 (앞 800자)</summary>
@@ -1038,11 +1133,21 @@
   async function createExceptionPage() {
     await checkServer();
     if (!serverOnline) { setStatus('로컬 서버가 실행 중이지 않습니다.', 'error'); return; }
+    const pageTypes = [];
+    if (document.getElementById('optMakeEmptyPage')?.checked) pageTypes.push('empty');
+    if (document.getElementById('optMakeErrorPage')?.checked) pageTypes.push('error');
+    if (!pageTypes.length) {
+      setStatus('제작할 페이지를 1개 이상 선택하세요.', 'error');
+      return;
+    }
     placeResultsForTab('exception');
     const btn = document.getElementById('createExceptionPageBtn');
+    const origText = btn.textContent;
     btn.disabled = true;
-    setStatus('예외 케이스 페이지 제작 중...', 'loading');
-    Progress.begin('PRD와 디자인시스템 분석 중', 0, 92, 35, true);
+    btn.textContent = '⏳ Claude가 페이지 구성 중... (약 1분)';
+    btn.style.fontSize = '11px';
+    setStatus('예외 케이스 페이지 제작 중... Claude가 PRD와 디자인시스템을 분석합니다.', 'loading');
+    Progress.begin('PRD와 디자인시스템 분석 중', 0, 92, 55, true);
     try {
       const data = await safeJsonFetch(SERVER + '/make-exception-page', {
         method: 'POST',
@@ -1050,18 +1155,27 @@
         body: JSON.stringify({
           prdContent: docs.prd?.content || null,
           reqContent: docs.req?.content || null,
+          pageTypes,
+          frameImage: lastFrameData[0]?.image || null,
+          frameName: lastFrameData[0]?.name || null,
+          sourceNodeId: lastFrameData[0]?.nodeId || lastSelectionNodeIds[0] || null,
         }),
       });
+      btn.textContent = '✏️ 캔버스에 그리는 중...';
       Progress.jump(92, '캔버스에 페이지 제작 중');
       parent.postMessage({ pluginMessage: {
         type: 'draw-exception-page',
         page: data.page,
+        pages: data.pages,
+        sourceNodeId: lastFrameData[0]?.nodeId || lastSelectionNodeIds[0] || null,
       }}, '*');
     } catch (e) {
       Progress.hide();
       setStatus('오류: ' + e.message, 'error');
     }
     btn.disabled = false;
+    btn.textContent = origText;
+    btn.style.fontSize = '';
   }
 
   // ── 복사 ──
@@ -1089,7 +1203,7 @@
       const dlHtml = dl ? `
           <div style="padding:6px 13px 9px;border-top:1px dashed #333;background:#1f2330;">
             <a href="${esc(dl.url)}" target="_blank" rel="noopener" style="font-size:11px;color:#8bb6ff;text-decoration:none;">
-              🔗 ${esc(dl.label || '디자인시스템 상세 명세')}
+              🔗 ${esc(dl.label || '디자인시스템 컴포넌트 md')}
             </a>
           </div>` : '';
       if (lastMode === 'exception') {
@@ -1176,7 +1290,10 @@
     if (msg.type === 'error') {
       setStatus(msg.message, 'error');
       Progress.hide();
-      ['generateSpecBtn','generateExceptionBtn'].forEach(id => { const b = document.getElementById(id); if (b) b.disabled = false; });
+      ['generateSpecBtn','generateExceptionBtn','createExceptionPageBtn'].forEach(id => {
+        const b = document.getElementById(id);
+        if (b) { b.disabled = false; b.textContent = b.dataset.origText || b.textContent; b.style.fontSize = ''; }
+      });
       return;
     }
 
@@ -1225,21 +1342,24 @@
 
     if (msg.type === 'exception-page-drawn') {
       Progress.finish('완료');
-      setStatus('✅ 예외 케이스 페이지가 생성됐습니다.', 'success');
+      const count = msg.count || 1;
+      setStatus(`✅ 예외 케이스 페이지 ${count}개가 생성됐습니다.`, 'success');
       setTimeout(() => Progress.hide(), 2500);
       return;
     }
 
     if (msg.type === 'selection-data') {
       lastSelectionBounds = msg.selectionBounds || null;
-      lastSelectionNodeIds = msg.selectionNodeIds || [];
+      // 인스턴스 서브레이어 ID ("I숫자:숫자;숫자:숫자") 는 code.js에서 에러를 발생시키므로 제외
+      lastSelectionNodeIds = (msg.selectionNodeIds || []).filter(id => !/^I\d.*;\d/.test(String(id)));
       lastPreviousFeatures = Array.isArray(msg.previousFeatures) ? msg.previousFeatures : [];
+      lastFrameData = Array.isArray(msg.data) ? msg.data : [];
       updateHistCount(lastPreviousFeatures.length);
       const hasDocs = !!(docs.prd || docs.req);
       const docNames = [docs.prd?.name, docs.req?.name].filter(Boolean).join(', ');
       const estSec = estimateAnalyzeSeconds(msg.data, hasDocs, lastMode);
-      setStatus(hasDocs ? `Claude 분석 중 (문서: ${docNames})...` : 'Claude가 화면 구조 분석 중...', 'loading');
-      Progress.begin(lastMode === 'exception' ? 'Claude가 예외 케이스 도출 중' : 'Claude가 기능 도출 중', 10, 92, estSec, false);
+      setStatus(hasDocs ? `Codex 분석 중 (문서: ${docNames})...` : 'Codex가 화면 구조 분석 중...', 'loading');
+      Progress.begin(lastMode === 'exception' ? 'Codex가 예외 케이스 도출 중' : 'Codex가 기능 도출 중', 10, 92, estSec, false);
 
       try {
         const useAccumulate = lastMode === 'exception'

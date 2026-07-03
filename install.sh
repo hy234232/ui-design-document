@@ -6,9 +6,8 @@ set -e
 
 PLIST_NAME="com.figma.feature-spec.server"
 PLIST_PATH="$HOME/Library/LaunchAgents/$PLIST_NAME.plist"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SERVER_PATH="$SCRIPT_DIR/server.js"
-LOG_DIR="$SCRIPT_DIR/logs"
+SERVER_PATH="$HOME/Documents/figmaplugin_260531/server.js"
+LOG_DIR="$HOME/Documents/figmaplugin_260531/logs"
 
 # node 경로 확인
 NODE_PATH=$(which node 2>/dev/null || true)
@@ -18,19 +17,9 @@ if [ -z "$NODE_PATH" ]; then
   exit 1
 fi
 
-# Claude Code CLI 확인 — 버전 폴더를 동적으로 탐색
-CLAUDE_CODE_DIR="$HOME/Library/Application Support/Claude/claude-code"
-CLAUDE_PATH=""
-if [ -d "$CLAUDE_CODE_DIR" ]; then
-  for ver in $(ls "$CLAUDE_CODE_DIR" | sort -rV); do
-    candidate="$CLAUDE_CODE_DIR/$ver/claude.app/Contents/MacOS/claude"
-    if [ -x "$candidate" ]; then
-      CLAUDE_PATH="$candidate"
-      break
-    fi
-  done
-fi
-if [ -z "$CLAUDE_PATH" ]; then
+# Claude Code CLI 확인
+CLAUDE_PATH="$HOME/Library/Application Support/Claude/claude-code/2.1.149/claude.app/Contents/MacOS/claude"
+if [ ! -x "$CLAUDE_PATH" ]; then
   CLAUDE_PATH=$(which claude 2>/dev/null || true)
 fi
 if [ -z "$CLAUDE_PATH" ]; then
@@ -43,8 +32,9 @@ echo "✔ Claude CLI: $CLAUDE_PATH"
 mkdir -p "$LOG_DIR"
 
 # 기존 서비스 중지
-LAUNCH_DOMAIN="gui/$(id -u)"
-launchctl bootout "$LAUNCH_DOMAIN" "$PLIST_PATH" 2>/dev/null || true
+if launchctl list 2>/dev/null | grep -q "$PLIST_NAME"; then
+  launchctl unload "$PLIST_PATH" 2>/dev/null || true
+fi
 
 # PATH 구성 (node, claude 경로 포함)
 LAUNCH_PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$(dirname "$NODE_PATH"):$(dirname "$CLAUDE_PATH")"
@@ -60,9 +50,8 @@ cat > "$PLIST_PATH" <<EOF
 
   <key>ProgramArguments</key>
   <array>
-    <string>/bin/zsh</string>
-    <string>-lc</string>
-    <string>cd "$SCRIPT_DIR" &amp;&amp; exec "$NODE_PATH" "$SERVER_PATH"</string>
+    <string>$NODE_PATH</string>
+    <string>$SERVER_PATH</string>
   </array>
 
   <key>EnvironmentVariables</key>
@@ -76,7 +65,7 @@ cat > "$PLIST_PATH" <<EOF
   </dict>
 
   <key>WorkingDirectory</key>
-  <string>$SCRIPT_DIR</string>
+  <string>$HOME/Documents/figmaplugin_260531</string>
 
   <key>RunAtLoad</key>
   <true/>
@@ -93,8 +82,7 @@ cat > "$PLIST_PATH" <<EOF
 </plist>
 EOF
 
-launchctl bootstrap "$LAUNCH_DOMAIN" "$PLIST_PATH"
-launchctl kickstart -k "$LAUNCH_DOMAIN/$PLIST_NAME" 2>/dev/null || true
+launchctl load "$PLIST_PATH"
 
 echo ""
 echo "✅ 설치 완료!"
@@ -103,4 +91,4 @@ echo "   Claude Code 로그인 세션을 사용합니다. (API 키 불필요)"
 echo "   Mac 재시작 후에도 자동으로 실행됩니다."
 echo ""
 echo "   로그 확인:  tail -f $LOG_DIR/server.log"
-echo "   서비스 중지: bash $SCRIPT_DIR/uninstall.sh"
+echo "   서비스 중지: bash $HOME/Documents/figmaplugin_260531/uninstall.sh"
