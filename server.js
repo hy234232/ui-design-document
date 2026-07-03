@@ -1191,6 +1191,142 @@ ${requirementRows}
   };
 }
 
+function compactAnalyzeFrameData(frameData) {
+  return (Array.isArray(frameData) ? frameData : []).map(f => {
+    const copy = Object.assign({}, f);
+    ['titles', 'tabs', 'sections', 'buttons', 'iconActions', 'links', 'inputs', 'selects', 'tableHeaders', 'listItems', 'badges', 'contextNotes'].forEach(k => {
+      if (Array.isArray(copy[k])) copy[k] = copy[k].slice(0, k === 'allTexts' ? 60 : 20);
+    });
+    if (Array.isArray(copy.allTexts)) {
+      copy.allTexts = copy.allTexts
+        .slice(0, 80)
+        .map(t => String(t || '').slice(0, 500));
+    }
+    delete copy.image;
+    return copy;
+  });
+}
+
+function inferListLimit(frameData) {
+  const joined = (Array.isArray(frameData) ? frameData : [])
+    .flatMap(f => Array.isArray(f.allTexts) ? f.allTexts : [])
+    .join(' ');
+  const m = joined.match(/(?:최대|최근|목록)\s*(\d+)\s*개|(\d+)\s*개\s*(?:표시|노출)/);
+  return m ? (m[1] || m[2]) : '';
+}
+
+function makeFallbackFeature(name, fe, be, anchorNote) {
+  return {
+    feature: name,
+    icon: '🔹',
+    fe: fe || '화면 기준 기능 표시',
+    be: be || '관련 데이터 조회',
+    anchor: anchorNote ? { x: 0.08, y: 0.16, note: anchorNote } : null,
+  };
+}
+
+function buildFallbackAnalyzeResult(frameData, mode, reqFlags, reason) {
+  frameData = Array.isArray(frameData) ? frameData : [];
+  const title = firstNonEmpty(
+    frameData.flatMap(f => []
+      .concat(f.titles || [])
+      .concat(f.sections || [])
+      .concat(f.frameName || [])),
+    '선택 화면'
+  );
+  const features = [];
+  const seen = new Set();
+  const add = (name, fe, be, anchorNote) => {
+    name = String(name || '').trim();
+    if (!name || seen.has(name)) return;
+    seen.add(name);
+    features.push(makeFallbackFeature(name, fe, be, anchorNote));
+  };
+
+  const listLimit = inferListLimit(frameData);
+  frameData.forEach((f, idx) => {
+    const label = firstNonEmpty([f.frameName].concat(f.sections || []).concat(f.titles || []), `선택 영역 ${idx + 1}`);
+    const headers = Array.isArray(f.tableHeaders) ? f.tableHeaders.join(', ') : '';
+    const texts = Array.isArray(f.allTexts) ? f.allTexts.join(' ') : '';
+    const hasPhoto = /사진|이미지|썸네일|thumbnail/i.test(headers + ' ' + texts);
+
+    if (f.hasTable || (f.tableHeaders && f.tableHeaders.length)) {
+      add(
+        `${label} 목록 조회`,
+        `테이블 표시${listLimit ? `, 최대 ${listLimit}개 노출` : ''}${hasPhoto ? ', 사진 썸네일 표시' : ''}`,
+        `목록 조회 API${listLimit ? `, limit=${listLimit}` : ''}`,
+        '테이블/목록'
+      );
+    }
+
+    (f.buttons || []).slice(0, 8).forEach(btn => {
+      add(`${btn} 실행`, `${btn} 버튼 클릭 처리`, `${btn} 처리 요청`, btn);
+    });
+    (f.selects || []).slice(0, 6).forEach(sel => {
+      add(`${sel} 선택`, `${sel} 드롭다운 선택값 반영`, `${sel} 기준 조회`, sel);
+    });
+    (f.inputs || []).slice(0, 6).forEach(input => {
+      add(`${input} 입력`, `${input} 입력값 반영`, `${input} 값 검증 및 저장`, input);
+    });
+    (f.badges || []).slice(0, 6).forEach(badge => {
+      add(`${badge} 상태 표시`, `${badge} 뱃지/상태값 표시`, `${badge} 상태값 제공`, badge);
+    });
+  });
+
+  if (!features.length) {
+    const notes = compactFrameNotes(frameData).slice(0, 8);
+    notes.forEach((note, i) => add(`선택 영역 ${i + 1} 정보 표시`, note.slice(0, 80), '관련 데이터 제공', `선택 영역 ${i + 1}`));
+  }
+  if (!features.length) add('화면 정보 조회', '선택 화면의 주요 정보를 표시', '화면 데이터 조회', null);
+
+  if (mode === 'exception') {
+    const edgeCases = reqFlags && reqFlags.edge ? [
+      {
+        feature: '긴 텍스트 표시 상태',
+        categoryNo: 6,
+        categoryTitle: '텍스트 극단값',
+        priority: '권장',
+        icon: '🧩',
+        problem: '텍스트가 길면 테이블 셀이나 카드 레이아웃을 밀어낼 수 있습니다.',
+        design: '말줄임, 줄바꿈, 툴팁 상태를 제작합니다.',
+        components: '텍스트 셀, 툴팁',
+        devTitle: '긴 텍스트 처리',
+        fe: '말줄임·툴팁 표시',
+        be: '원문 텍스트 제공',
+        anchor: null,
+      },
+    ] : [];
+    const errorCases = reqFlags && reqFlags.error ? [
+      {
+        feature: '데이터 없음 상태',
+        categoryNo: 1,
+        categoryTitle: '데이터 상태',
+        priority: '필수',
+        icon: '⚠️',
+        problem: '조회 결과가 없으면 사용자가 현재 상태를 알기 어렵습니다.',
+        design: 'Empty State와 안내 문구를 제작합니다.',
+        components: 'Empty State',
+        devTitle: '빈 결과 상태',
+        fe: '빈 상태 표시',
+        be: '0건 응답 제공',
+        anchor: null,
+      },
+    ] : [];
+    return { features: [], overview: null, edgeCases, errorCases, fallbackReason: reason };
+  }
+
+  return {
+    overview: {
+      title,
+      purpose: `${title} 화면에서 확인된 UI 텍스트와 선택 영역 구조를 기준으로 기능을 정리합니다.`,
+    },
+    features: features.slice(0, 16),
+    edgeCases: [],
+    errorCases: [],
+    fallbackReason: reason,
+  };
+}
+
 // ── 응답에서 JSON 객체/배열만 안전 추출 (코드펜스·앞뒤 산문·문자열 내 괄호 대응) ──
 function extractJson(raw) {
   let text = String(raw || '').trim();
@@ -1671,31 +1807,49 @@ JSON 객체 1개만 출력하세요. 코드펜스 금지.
         });
         console.log(`[이미지] ${imagePaths.length}개 저장`);
 
-        const prompt = buildPrompt(frameData, docSection, hasDocs, imagePaths, previousFeatures || [], !!includeCommon, effMode, reqFlags);
+        const promptFrameData = compactAnalyzeFrameData(frameData);
+        const promptImagePaths = imagePaths.slice(0, promptFrameData.length > 3 ? 1 : 2);
+        const prompt = buildPrompt(promptFrameData, docSection, hasDocs, promptImagePaths, previousFeatures || [], !!includeCommon, effMode, reqFlags);
 
         // 디버그 덤프 — 무엇을 읽었고 무엇을 받았는지 추적
         try {
           const dbgDir = path.join(__dirname, 'logs');
           fs.writeFileSync(path.join(dbgDir, 'last-framedata.json'), JSON.stringify(frameData, null, 2));
+          fs.writeFileSync(path.join(dbgDir, 'last-prompt-framedata.json'), JSON.stringify(promptFrameData, null, 2));
           fs.writeFileSync(path.join(dbgDir, 'last-prompt.txt'), prompt);
         } catch (de) { /* 무시 */ }
 
-        const raw = await callClaudeCLI(prompt);
+        let raw = '';
+        let usedFallback = false;
+        let fallbackReason = null;
+        try {
+          raw = await callClaudeCLI(prompt, false, promptFrameData.length > 4 ? 120000 : 180000);
+        } catch (ce) {
+          usedFallback = true;
+          fallbackReason = ce && ce.message ? ce.message : String(ce);
+          console.warn('[분석 fallback]', fallbackReason);
+        }
 
         try {
           fs.writeFileSync(path.join(__dirname, 'logs', 'last-response.txt'), String(raw || ''));
         } catch (de) { /* 무시 */ }
 
-        const jsonStr = extractJson(raw);
-        if (!jsonStr) {
-          throw new Error('응답에서 JSON을 찾을 수 없습니다. 응답 일부: ' + raw.slice(0, 200));
-        }
-
         let parsed;
-        try {
-          parsed = JSON.parse(jsonStr);
-        } catch (pe) {
-          throw new Error('JSON 파싱 실패: ' + pe.message + ' | 추출된 내용: ' + jsonStr.slice(0, 200));
+        if (usedFallback) {
+          parsed = buildFallbackAnalyzeResult(frameData, effMode, reqFlags, fallbackReason);
+        } else {
+          const jsonStr = extractJson(raw);
+          if (!jsonStr) {
+            parsed = buildFallbackAnalyzeResult(frameData, effMode, reqFlags, 'Claude 응답에서 JSON을 찾을 수 없습니다.');
+            usedFallback = true;
+          } else {
+            try {
+              parsed = JSON.parse(jsonStr);
+            } catch (pe) {
+              parsed = buildFallbackAnalyzeResult(frameData, effMode, reqFlags, 'JSON 파싱 실패: ' + pe.message);
+              usedFallback = true;
+            }
+          }
         }
 
         // 모드별 응답 키 추출
@@ -1724,10 +1878,12 @@ JSON 객체 1개만 출력하세요. 코드펜스 금지.
         const pad = n => String(n).padStart(2, '0');
         const meta = {
           model: MODEL,
-          tool: 'Claude Code CLI (기능 명세 생성기)',
+          tool: usedFallback ? 'Local fallback (기능 명세 생성기)' : 'Claude Code CLI (기능 명세 생성기)',
           os: `${process.platform} ${os.release()} (${process.arch})`,
           node: process.version,
           generatedAt: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`,
+          fallback: usedFallback,
+          fallbackReason,
         };
 
         res.end(JSON.stringify({ features, overview, edgeCases, errorCases, meta }));
