@@ -22,6 +22,7 @@ const FEATURE_REPO_BRANCH = 'main';
 const FEATURE_REPO_WORKDIR = path.join(__dirname, '.github-sync', 'features');
 const FEATURE_GITHUB_BASE = 'https://github.com/hy234232/features/blob/main';
 const FEATURE_SKILL_DIR = path.join(os.homedir(), '.codex', 'skills', 'feature-generator');
+const FEATURE_LOCAL_OUTPUT_DIR = path.join(__dirname, 'generated-features');
 
 // 디자인시스템.md 로드 — 매 분석 요청마다 호출되어 최신 내용을 반영.
 // 파일이 없거나 읽기 실패 시 빈 문자열 반환(분석은 계속 진행, 단순 폴백).
@@ -338,6 +339,42 @@ function publishFeatureMdToGithub(filename, markdown, imagePaths, title) {
     githubUrl: `${FEATURE_GITHUB_BASE}/${filename}`,
     committed: true,
     pushed: true,
+  };
+}
+
+function saveFeatureMdLocally(filename, markdown, imagePaths) {
+  filename = slugifyAscii(filename, 'feature-' + shortHash(markdown)).replace(/\.md$/i, '') + '.md';
+  const topic = filename.replace(/\.md$/i, '');
+  const assetRelDir = `assets/${topic}`;
+  markdown = stripCodeFence(markdown)
+    .replace(/assets\/\{\{topic\}\}/g, assetRelDir)
+    .replace(/assets\/<topic>/g, assetRelDir);
+
+  if (!fs.existsSync(FEATURE_LOCAL_OUTPUT_DIR)) fs.mkdirSync(FEATURE_LOCAL_OUTPUT_DIR, { recursive: true });
+  const assetDir = path.join(FEATURE_LOCAL_OUTPUT_DIR, assetRelDir);
+  if (!fs.existsSync(assetDir)) fs.mkdirSync(assetDir, { recursive: true });
+
+  const assetFiles = [];
+  (imagePaths || []).forEach((imgPath, idx) => {
+    try {
+      const outName = `screen-${idx + 1}.png`;
+      const bordered = addLightGrayPngBorder(fs.readFileSync(imgPath));
+      const outPath = path.join(assetDir, outName);
+      fs.writeFileSync(outPath, bordered);
+      assetFiles.push(path.join(assetDir, outName));
+    } catch (e) {
+      console.warn('[이미지 테두리 처리 실패]', e.message);
+    }
+  });
+
+  const mdPath = path.join(FEATURE_LOCAL_OUTPUT_DIR, filename);
+  fs.writeFileSync(mdPath, markdown, 'utf8');
+  return {
+    filename,
+    localPath: mdPath,
+    outputDir: FEATURE_LOCAL_OUTPUT_DIR,
+    assetDir,
+    assetFiles,
   };
 }
 
@@ -848,7 +885,7 @@ function buildFeatureMdPrompt(payload, imagePaths) {
     ? generatedFeatures.map((f, i) => `${i + 1}. ${f.feature || '기능'}\n   - FE: ${f.fe || ''}\n   - BE: ${f.be || ''}`).join('\n')
     : '(플러그인 기능 카드가 아직 없거나 전달되지 않았습니다. 선택 영역 텍스트와 추가 텍스트를 우선 사용하세요.)';
 
-  const imageRefs = imagePaths.map((p, i) => `- 화면 이미지 ${i + 1}: @${p}\n  - MD에 넣을 상대 경로: assets/{{topic}}/screen-${i + 1}.png`).join('\n') || '- 이미지 없음';
+  const imageRefs = imagePaths.map((p, i) => `- 화면 이미지 ${i + 1} 저장 예정 경로: assets/{{topic}}/screen-${i + 1}.png`).join('\n') || '- 이미지 없음';
 
   return `당신은 feature-generator 스킬을 따르는 한국어 기능명세서 MD 작성자입니다.
 아래 스킬 지침을 엄격히 적용해 기능명세서 Markdown 파일 1개를 생성하세요.
@@ -1486,8 +1523,8 @@ JSON 객체 1개만 출력하세요. 코드펜스 금지.
           fs.writeFileSync(path.join(imgDir, 'last-feature-md-prompt.txt'), prompt);
         } catch (de) { /* ignore */ }
 
-        console.log(`[기능명세 MD] 생성 요청 · 선택영역 ${frameData.length}개 · 이미지 ${imagePaths.length}개 · 프롬프트 이미지 ${promptImagePaths.length}개`);
-        const raw = await callClaudeCLI(prompt, false, 600000);
+        console.log(`[기능명세 MD] 로컬 생성 요청 · 선택영역 ${frameData.length}개 · 이미지 ${imagePaths.length}개 · MD 첨부 이미지 ${promptImagePaths.length}개`);
+        const raw = await callClaudeCLI(prompt, false, 240000);
         try { fs.writeFileSync(path.join(imgDir, 'last-feature-md-response.txt'), String(raw || '')); } catch (de) { /* ignore */ }
 
         const jsonStr = extractJson(raw);
@@ -1503,18 +1540,18 @@ JSON 객체 1개만 출력하세요. 코드펜스 금지.
         const markdown = stripCodeFence(parsed.markdown || '');
         if (!markdown || markdown.length < 200) throw new Error('생성된 Markdown 내용이 비어 있거나 너무 짧습니다.');
         const filename = String(parsed.filename || parsed.title || 'feature-spec').trim();
-        const published = publishFeatureMdToGithub(filename, markdown, imagePaths, parsed.title || filename);
+        const saved = saveFeatureMdLocally(filename, markdown, imagePaths);
 
-        console.log(`[기능명세 MD] ${published.filename} · GitHub ${published.pushed ? '푸시 완료' : '변경 없음'}`);
+        console.log(`[기능명세 MD] ${saved.filename} · 로컬 저장 완료: ${saved.localPath}`);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           ok: true,
-          filename: published.filename,
-          title: parsed.title || published.filename,
-          githubUrl: published.githubUrl,
-          committed: published.committed,
-          pushed: published.pushed,
-          reason: published.reason || null,
+          filename: saved.filename,
+          title: parsed.title || saved.filename,
+          localPath: saved.localPath,
+          outputDir: saved.outputDir,
+          assetDir: saved.assetDir,
+          assetCount: saved.assetFiles.length,
         }));
       } catch (e) {
         console.error('[기능명세 MD 오류]', e.message);

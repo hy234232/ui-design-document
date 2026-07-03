@@ -457,13 +457,13 @@
     <div class="md-builder">
       <div class="md-builder-title">
         <span>기능명세 MD 생성</span>
-        <span style="font-size:10px;color:#777;font-weight:500;">hy234232/features 자동 커밋·푸시</span>
+        <span style="font-size:10px;color:#777;font-weight:500;">로컬 .md 파일 저장</span>
       </div>
       <textarea id="featureMdExtraText" placeholder="추가 텍스트를 입력하세요. 예: SOP 상태 4종류는 위험 단계 1~3단계에 따라 종류가 달라짐. 단계별 상태 기준과 보고서 작성 조건을 기능명세에 반영."></textarea>
       <div id="featureMdExtraPreview" class="md-extra-preview"></div>
       <button class="btn btn-primary" id="generateFeatureMdBtn" onclick="generateFeatureMd()">기능명세 MD 생성</button>
       <div class="md-builder-help">
-        Figma 화면과 기능설명 영역을 함께 선택한 뒤 실행하세요. 선택 영역 내부의 주석/설명 텍스트와 위 추가 텍스트를 함께 읽어 feature-generator 스킬 형식의 MD를 생성합니다.
+        Figma 화면과 기능설명 영역을 함께 선택한 뒤 실행하세요. 선택 영역 내부의 주석/설명 텍스트와 위 추가 텍스트를 함께 읽어 feature-generator 스킬 형식의 MD를 로컬에 저장합니다.
       </div>
       <div id="featureMdResult"></div>
     </div>
@@ -1428,7 +1428,7 @@
       const extraText = document.getElementById('featureMdExtraText').value || '';
       const featureMdResult = document.getElementById('featureMdResult');
       setStatus('feature-generator 스킬로 기능명세 MD 생성 중...', 'loading');
-      Progress.begin('기능명세 MD 작성 및 GitHub 푸시 중', 12, 94, 70, false);
+      Progress.begin('기능명세 MD 작성 및 로컬 저장 중', 12, 94, 70, false);
       try {
         const data = await safeJsonFetch(SERVER + '/generate-feature-md', {
           method: 'POST',
@@ -1443,21 +1443,13 @@
           }),
         });
         Progress.finish('완료');
-        const pushedText = data.pushed ? '커밋·푸시 완료' : '변경 없음';
         featureMdResult.innerHTML = `
           <div class="md-link-card">
-            ✅ ${esc(data.filename)} 생성 완료 · ${esc(pushedText)}<br>
-            <a href="${esc(data.githubUrl)}" target="_blank" rel="noopener">${esc(data.githubUrl)}</a>
+            ✅ ${esc(data.filename)} 로컬 저장 완료<br>
+            <span style="color:#8f96a3;">${esc(data.localPath || '')}</span><br>
+            <span style="color:#6f7480;">assets ${Number(data.assetCount || 0)}개 · ${esc(data.assetDir || '')}</span>
           </div>`;
         setStatus(`✅ 기능명세 MD 생성 완료: ${data.filename}`, 'success');
-        if (data.githubUrl) {
-          parent.postMessage({ pluginMessage: {
-            type: 'create-md-shortcut',
-            url: data.githubUrl,
-            filename: data.filename,
-            sourceNodeId: (msg.selectionNodeIds && msg.selectionNodeIds[0]) || null,
-          }}, '*');
-        }
         setTimeout(() => Progress.hide(), 2500);
       } catch (e) {
         Progress.hide();
