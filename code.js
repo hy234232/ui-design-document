@@ -922,6 +922,43 @@ function makePinkBadge(num, fontFamily, blackStyle) {
   return badge;
 }
 
+function hasValidAnchor(item) {
+  var a = item && item.anchor;
+  return !!(a && typeof a.x === 'number' && typeof a.y === 'number');
+}
+
+function sortByVisualPosition(items) {
+  items = Array.isArray(items) ? items.slice() : [];
+  return items
+    .map(function (item, index) { return { item: item, index: index }; })
+    .sort(function (a, b) {
+      var aa = a.item && a.item.anchor;
+      var bb = b.item && b.item.anchor;
+      var av = hasValidAnchor(a.item);
+      var bv = hasValidAnchor(b.item);
+      if (av && bv) {
+        var ay = Math.max(0, Math.min(1, aa.y));
+        var by = Math.max(0, Math.min(1, bb.y));
+        var ax = Math.max(0, Math.min(1, aa.x));
+        var bx = Math.max(0, Math.min(1, bb.x));
+        if (Math.abs(ay - by) > 0.035) return ay - by;
+        if (Math.abs(ax - bx) > 0.02) return ax - bx;
+      } else if (av !== bv) {
+        return av ? -1 : 1;
+      }
+      return a.index - b.index;
+    })
+    .map(function (entry) { return entry.item; });
+}
+
+function clampBadgePosition(x, y, badge, bounds) {
+  var pad = 4;
+  return {
+    x: Math.round(Math.max(bounds.x + pad, Math.min(x, bounds.x + bounds.width - badge.width - pad))),
+    y: Math.round(Math.max(bounds.y + pad, Math.min(y, bounds.y + bounds.height - badge.height - pad))),
+  };
+}
+
 // ── 선택 프레임 복제 + 핑크 뱃지 오버레이 (원본 아래 80px) ──
 async function createLabeledClone(sourceNodeId, features, fontFamily, blackStyle) {
   if (!sourceNodeId) return null;
@@ -947,15 +984,26 @@ async function createLabeledClone(sourceNodeId, features, fontFamily, blackStyle
   var cloneY = clone.y;
 
   var badges = [];
-  for (var i = 0; i < features.length; i++) {
-    var f = features[i];
+  var orderedFeatures = sortByVisualPosition(features);
+  for (var i = 0; i < orderedFeatures.length; i++) {
+    var f = orderedFeatures[i];
     var a = f && f.anchor;
     if (!a || typeof a.x !== 'number' || typeof a.y !== 'number') continue;
     var rx = Math.max(0, Math.min(1, a.x));
     var ry = Math.max(0, Math.min(1, a.y));
     var badge = makePinkBadge(i + 1, fontFamily, blackStyle);
-    badge.x = Math.round(cloneX + rx * cloneW - badge.width / 2);
-    badge.y = Math.round(cloneY + ry * cloneH - badge.height / 2);
+    var targetX = cloneX + rx * cloneW;
+    var targetY = cloneY + ry * cloneH;
+    // anchor가 가리키는 UI의 좌측 상단 주변에 붙인다. 배지 자체가 텍스트 중앙을 덮지 않도록
+    // 우선 anchor의 좌상단 바깥쪽으로 빼고, 프레임 밖으로 나가면 내부 가장자리로 고정한다.
+    var pos = clampBadgePosition(
+      targetX - badge.width - 6,
+      targetY - badge.height - 6,
+      badge,
+      { x: cloneX, y: cloneY, width: cloneW, height: cloneH }
+    );
+    badge.x = pos.x;
+    badge.y = pos.y;
     figma.currentPage.appendChild(badge);
     badges.push(badge);
   }
@@ -1604,6 +1652,7 @@ async function createMdShortcutPill(url, sourceNodeId, filename) {
 
 // ── 캔버스에 기능 명세 영역 생성 ──
 async function createSpecOnCanvas(features, selectionBounds, overview, meta, sourceNodeIds, unhappyFlows, edgeCases, cornerCases) {
+  features = sortByVisualPosition(Array.isArray(features) ? features : []);
   unhappyFlows = Array.isArray(unhappyFlows) ? unhappyFlows : [];
   edgeCases   = Array.isArray(edgeCases)   ? edgeCases   : [];
   cornerCases = Array.isArray(cornerCases) ? cornerCases : [];

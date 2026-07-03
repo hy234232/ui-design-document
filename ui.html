@@ -1131,6 +1131,34 @@
   }
   function onToggleOverview() { onToggleSections(); } // 하위 호환
 
+  function hasValidAnchor(item) {
+    const a = item && item.anchor;
+    return !!(a && typeof a.x === 'number' && typeof a.y === 'number');
+  }
+
+  function sortFeaturesByPosition(items) {
+    return (Array.isArray(items) ? items.slice() : [])
+      .map((item, index) => ({ item, index }))
+      .sort((a, b) => {
+        const av = hasValidAnchor(a.item);
+        const bv = hasValidAnchor(b.item);
+        if (av && bv) {
+          const aa = a.item.anchor;
+          const bb = b.item.anchor;
+          const ay = Math.max(0, Math.min(1, aa.y));
+          const by = Math.max(0, Math.min(1, bb.y));
+          const ax = Math.max(0, Math.min(1, aa.x));
+          const bx = Math.max(0, Math.min(1, bb.x));
+          if (Math.abs(ay - by) > 0.035) return ay - by;
+          if (Math.abs(ax - bx) > 0.02) return ax - bx;
+        } else if (av !== bv) {
+          return av ? -1 : 1;
+        }
+        return a.index - b.index;
+      })
+      .map(entry => entry.item);
+  }
+
   function renderFeatures(features, usedDocs) {
     lastUsedDocs = usedDocs;
     const container = document.getElementById('results');
@@ -1323,7 +1351,7 @@
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || `서버 오류 (${res.status})`);
 
-        lastFeatures = Array.isArray(data.features) ? data.features : [];
+        lastFeatures = sortFeaturesByPosition(Array.isArray(data.features) ? data.features : []);
         lastOverview = data.overview || null;
         lastMeta = data.meta || null;
         lastEdge = Array.isArray(data.edgeCases) ? data.edgeCases : [];
