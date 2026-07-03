@@ -493,7 +493,7 @@ function detectModalParts(node, result) {
     result.hasDimOverlay = true;
   }
 
-  // ② 모달 카드 — 이름으로 직접 잡히거나, 밝은 라운드 컨테이너 + 제목/버튼 보유
+  // ② 모달 카드 — 이름으로 직접 잡히거나, 딤 오버레이와 함께 떠 있는 카드만 인정
   var nameIsModal = /modal|dialog|popup|sheet|모달|팝업|다이얼로그|바텀시트/.test(lname);
 
   var looksLikeCard =
@@ -509,10 +509,13 @@ function detectModalParts(node, result) {
     // 카드 후보일 때는 액션 버튼/제목이 실제로 있어야 모달로 인정 (오탐 방지)
     var joined = texts.join(' ');
     var hasAction = ACTION_RE.test(joined);
-    if (nameIsModal || hasAction) {
+    if (nameIsModal) {
       var title = texts.length ? texts[0].slice(0, 30) : node.name;
       result.modals.add(title);
       result.hasModal = true;
+    } else if (hasAction) {
+      var candidateTitle = texts.length ? texts[0].slice(0, 30) : node.name;
+      result.modalCandidates.add(candidateTitle);
     }
   }
 }
@@ -659,11 +662,17 @@ function buildFrameSummary(node, opts) {
     rootW: ('width' in node) ? node.width : 0,
     rootH: ('height' in node) ? node.height : 0,
     hasDimOverlay: false, hasModal: false,
+    modalCandidates: new Set(),
     // 테이블·스크롤 감지
     hasTable: false, hasScroll: false,
     componentVariants: [], texts: [],
   };
   collectContext(node, ctx, 0);
+
+  if (ctx.hasDimOverlay && ctx.modalCandidates.size > 0) {
+    ctx.modalCandidates.forEach(title => ctx.modals.add(title));
+    ctx.hasModal = true;
+  }
 
   const s = set => [...set].filter(Boolean);
   const uniqueTexts = [...new Set(ctx.texts)].filter(t => t.length > 0 && t.length < 200);
