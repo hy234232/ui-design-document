@@ -1427,8 +1427,8 @@
     if (msg.type === 'md-selection-data') {
       const extraText = document.getElementById('featureMdExtraText').value || '';
       const featureMdResult = document.getElementById('featureMdResult');
-      setStatus('feature-generator 스킬로 기능명세 MD 생성 중...', 'loading');
-      Progress.begin('기능명세 MD 작성 및 로컬 저장 중', 12, 94, 70, false);
+      setStatus('기능명세 MD 로컬 저장 중...', 'loading');
+      Progress.begin('기능명세 MD 작성 및 로컬 저장 중', 12, 94, 8, false);
       try {
         const data = await safeJsonFetch(SERVER + '/generate-feature-md', {
           method: 'POST',

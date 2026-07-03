@@ -943,6 +943,254 @@ JSON 객체만 출력하세요. 설명/마크다운 fence를 붙이지 마세요
 }`;
 }
 
+function mdCell(value) {
+  return String(value == null ? '' : value)
+    .replace(/\r?\n/g, '<br>')
+    .replace(/\|/g, '\\|')
+    .trim();
+}
+
+function firstNonEmpty(arr, fallback) {
+  arr = Array.isArray(arr) ? arr : [];
+  for (const v of arr) {
+    const s = String(v || '').trim();
+    if (s) return s;
+  }
+  return fallback || '';
+}
+
+function featureMdTopic(payload, frameData, features) {
+  const overview = payload.overview || {};
+  const raw = overview.title
+    || (features[0] && features[0].feature)
+    || (frameData[0] && frameData[0].frameName)
+    || 'feature-spec';
+  const roman = String(raw)
+    .replace(/프로젝트/g, 'project')
+    .replace(/위험/g, 'risk')
+    .replace(/알림/g, 'alert')
+    .replace(/대시보드/g, 'dashboard')
+    .replace(/목록/g, 'list')
+    .replace(/상세/g, 'detail')
+    .replace(/설정/g, 'settings')
+    .replace(/관리/g, 'management');
+  return slugifyAscii(roman, 'feature-' + shortHash(raw)).slice(0, 60) || ('feature-' + shortHash(raw));
+}
+
+function compactFrameNotes(frameData) {
+  return frameData.map((f, idx) => {
+    const parts = [];
+    if (f.frameName) parts.push(`선택 영역 ${idx + 1}: ${f.frameName}`);
+    if (f.titles && f.titles.length) parts.push(`타이틀 ${f.titles.join(', ')}`);
+    if (f.sections && f.sections.length) parts.push(`섹션 ${f.sections.join(', ')}`);
+    if (f.tableHeaders && f.tableHeaders.length) parts.push(`테이블 컬럼 ${f.tableHeaders.join(', ')}`);
+    if (f.contextNotes && f.contextNotes.length) parts.push(`주석 ${f.contextNotes.join(' / ')}`);
+    if (f.allTexts && f.allTexts.length) parts.push(`텍스트 ${f.allTexts.slice(0, 8).join(' / ')}`);
+    return parts.join(' · ');
+  }).filter(Boolean);
+}
+
+function normalizeFeatureRows(payload, frameData) {
+  const generated = Array.isArray(payload.generatedFeatures) ? payload.generatedFeatures : [];
+  if (generated.length) {
+    return generated.map((f, i) => ({
+      id: `REQ-${String(i + 1).padStart(3, '0')}`,
+      name: f.feature || `기능 ${i + 1}`,
+      fe: f.fe || '원문 기준 추가 정의 필요',
+      be: f.be || '원문 기준 추가 정의 필요',
+      source: f.anchor && f.anchor.note ? f.anchor.note : '',
+    }));
+  }
+
+  const notes = compactFrameNotes(frameData).slice(0, 12);
+  if (notes.length) {
+    return notes.map((note, i) => ({
+      id: `REQ-${String(i + 1).padStart(3, '0')}`,
+      name: `선택 영역 ${i + 1} 요구사항 정리`,
+      fe: note,
+      be: '원문 기준 추가 정의 필요',
+      source: note,
+    }));
+  }
+
+  return [{
+    id: 'REQ-001',
+    name: '기능 요구사항 정리',
+    fe: '원문 기준 추가 정의 필요',
+    be: '원문 기준 추가 정의 필요',
+    source: '',
+  }];
+}
+
+function buildLocalFeatureMarkdown(payload, frameData, imageCount) {
+  const features = normalizeFeatureRows(payload, frameData);
+  const overview = payload.overview || {};
+  const additionalText = String(payload.additionalText || '').trim();
+  const notes = compactFrameNotes(frameData);
+  const topic = featureMdTopic(payload, frameData, features);
+  const title = overview.title || firstNonEmpty(frameData.map(f => f.frameName), '기능명세서');
+  const today = new Date().toISOString().slice(0, 10);
+  const purpose = overview.purpose || `${title} 화면에서 확인된 기능, 화면 텍스트, 추가 맥락을 기준으로 요구사항을 정리한다.`;
+  const imageLines = [];
+  for (let i = 0; i < imageCount; i++) {
+    imageLines.push(`![화면 참고 ${i + 1}](assets/{{topic}}/screen-${i + 1}.png)`);
+  }
+
+  const requirementRows = features.map((f, i) => {
+    const depth1 = '프로젝트';
+    const depth2 = title;
+    const depth3 = f.name;
+    const functional = [`- ${f.fe}`];
+    if (additionalText) functional.push(`- 추가 맥락: ${additionalText}`);
+    if (f.source) functional.push(`- 근거: ${f.source}`);
+    const screenReq = [`- 화면에서 ${f.name} 관련 UI를 표시한다.`];
+    if (imageCount) screenReq.push('- 화면 참고 이미지를 기준으로 UI 요소와 문구를 확인한다.');
+    return [
+      depth1,
+      depth2,
+      depth3,
+      f.id,
+      f.name,
+      purpose,
+      functional.join('<br>'),
+      `사용자가 화면 진입 → ${f.name} 확인/수행 → 관련 상태 확인`,
+      screenReq.join('<br>'),
+      '원문 기준 추가 정의 필요',
+      f.be,
+    ].map(mdCell).join(' | ');
+  }).map(row => `| ${row} |`).join('\n');
+
+  const iaRows = features.map(f => `| ${mdCell('프로젝트')} | ${mdCell(title)} | ${mdCell(f.name)} | ${mdCell(f.fe)} |`).join('\n');
+  const sourceRows = notes.slice(0, 20).map((n, i) => `| 선택 영역 ${i + 1} | ${mdCell(n)} |`).join('\n') || '| 선택 영역 | 원문 기준 추가 정의 필요 |';
+
+  return {
+    filename: `${topic}.md`,
+    title,
+    markdown: `# ${title} 기능명세서
+
+${purpose}
+
+\`\`\`yaml
+id: FEAT-${topic.toUpperCase().replace(/[^A-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32) || 'LOCAL'}-001
+version: 1.0.0
+status: draft
+owner_team: AI Research team
+effective_date: ${today}
+\`\`\`
+
+<br>
+<br>
+<br>
+
+## 1. 목적·범위
+
+- 목적: ${purpose}
+- 포함 범위: 선택한 Figma 화면, 기능설명 영역, 플러그인이 생성한 기능 카드, 추가 텍스트, 선택 영역 내부 주석/설명
+- 제외 범위: 원문에 없는 API 상세 구조, DB 스키마, 에러 코드, 내부 상태머신
+
+${additionalText ? `> 추가 텍스트: ${additionalText}\n` : ''}
+<br>
+<br>
+<br>
+
+## 2. 핵심 규칙
+
+### 2.1 IA / 기능 그룹
+
+| 1depth | 2depth | 3depth | 설명 |
+| --- | --- | --- | --- |
+${iaRows}
+
+<br>
+<br>
+
+### 2.2 권한 요약
+
+| 권한 | 해당 사용자(예시) | 주요 역할 | 주요 뷰권한 | 주요 처리 권한 | 제한/예외 |
+| --- | --- | --- | --- | --- | --- |
+| 원문 기준 추가 정의 필요 | 원문 기준 추가 정의 필요 | 선택 화면 기능 조회 및 처리 | 원문 기준 추가 정의 필요 | 원문 기준 추가 정의 필요 | 원문 기준 추가 정의 필요 |
+
+<br>
+<br>
+
+### 2.3 알림·위험알림 요약
+
+| 알림/이벤트 | 발송 대상 | 조회 권한 | 처리 권한 | 후속 처리 | 데이터/이력 |
+| --- | --- | --- | --- | --- | --- |
+| 원문 기준 추가 정의 필요 | 원문 기준 추가 정의 필요 | 원문 기준 추가 정의 필요 | 원문 기준 추가 정의 필요 | 원문 기준 추가 정의 필요 | 원문 기준 추가 정의 필요 |
+
+<br>
+<br>
+
+### 2.4 단계/상태 요약
+
+| 구분 | 명칭 | 기준 | 후속 처리 |
+| --- | --- | --- | --- |
+| 상태 | 원문 기준 추가 정의 필요 | 추가 텍스트 및 선택 영역 기준 확인 필요 | 원문 기준 추가 정의 필요 |
+
+<br>
+<br>
+
+### 2.5 백엔드 핵심 로직 요약
+
+| 구분 | 핵심 로직 | 권한/대상 | 저장/이력 | 관련 요구사항 |
+| --- | --- | --- | --- | --- |
+| 기능 요구사항 | 선택 화면의 기능 카드와 화면 텍스트 기준으로 요구사항 처리 | 원문 기준 추가 정의 필요 | 원문 기준 추가 정의 필요 | REQ-001~REQ-${String(features.length).padStart(3, '0')} |
+
+<br>
+<br>
+<br>
+
+## 3. 본문
+
+### 3.1 화면 참고 이미지
+
+${imageLines.length ? imageLines.join('\n\n') : '이미지 없음'}
+
+<br>
+<br>
+
+### 3.2 선택 영역 원문·주석 요약
+
+| 구분 | 내용 |
+| --- | --- |
+${sourceRows}
+
+<br>
+<br>
+
+### 3.3 요구사항 테이블
+
+| 1depth | 2depth | 3depth | 요구사항 ID | 요구사항명 | 요청목적 | 기능 요구사항 | 프로세스 요구사항 | 화면 요구사항 | 보안 요구사항 | 데이터 요구사항 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+${requirementRows}
+
+<br>
+<br>
+<br>
+
+## 4. 연관 링크
+
+| 구분 | 링크 |
+| --- | --- |
+| 관련 PRD | TBD |
+| 관련 정책 | TBD |
+| 관련 기능명세서 | TBD |
+| 외부 링크 | TBD |
+
+<br>
+<br>
+<br>
+
+## 5. 변경 이력
+
+| 버전 | 일자 | 변경 내용 | 작성자 |
+| --- | --- | --- | --- |
+| 1.0.0 | ${today} | 최초 작성 | Codex, 김혜연 |
+`,
+  };
+}
+
 // ── 응답에서 JSON 객체/배열만 안전 추출 (코드펜스·앞뒤 산문·문자열 내 괄호 대응) ──
 function extractJson(raw) {
   let text = String(raw || '').trim();
@@ -1516,30 +1764,20 @@ JSON 객체 1개만 출력하세요. 코드펜스 금지.
           delete f.image;
         });
 
-        const promptImagePaths = imagePaths.slice(0, 6);
-        const prompt = buildFeatureMdPrompt(Object.assign({}, payload, { frameData }), promptImagePaths);
+        const localMd = buildLocalFeatureMarkdown(payload, frameData, imagePaths.length);
         try {
           fs.writeFileSync(path.join(imgDir, 'last-feature-md-framedata.json'), JSON.stringify(frameData, null, 2));
-          fs.writeFileSync(path.join(imgDir, 'last-feature-md-prompt.txt'), prompt);
+          fs.writeFileSync(path.join(imgDir, 'last-feature-md-local.json'), JSON.stringify({
+            filename: localMd.filename,
+            title: localMd.title,
+            imageCount: imagePaths.length,
+          }, null, 2));
         } catch (de) { /* ignore */ }
 
-        console.log(`[기능명세 MD] 로컬 생성 요청 · 선택영역 ${frameData.length}개 · 이미지 ${imagePaths.length}개 · MD 첨부 이미지 ${promptImagePaths.length}개`);
-        const raw = await callClaudeCLI(prompt, false, 240000);
-        try { fs.writeFileSync(path.join(imgDir, 'last-feature-md-response.txt'), String(raw || '')); } catch (de) { /* ignore */ }
-
-        const jsonStr = extractJson(raw);
-        if (!jsonStr) throw new Error('기능명세 MD 응답에서 JSON을 찾을 수 없습니다. 응답 일부: ' + String(raw || '').slice(0, 200));
-
-        let parsed;
-        try {
-          parsed = JSON.parse(jsonStr);
-        } catch (pe) {
-          throw new Error('기능명세 MD JSON 파싱 실패: ' + pe.message + ' | 추출된 내용: ' + jsonStr.slice(0, 200));
-        }
-
-        const markdown = stripCodeFence(parsed.markdown || '');
+        console.log(`[기능명세 MD] 로컬 생성 · 선택영역 ${frameData.length}개 · 이미지 ${imagePaths.length}개`);
+        const markdown = stripCodeFence(localMd.markdown || '');
         if (!markdown || markdown.length < 200) throw new Error('생성된 Markdown 내용이 비어 있거나 너무 짧습니다.');
-        const filename = String(parsed.filename || parsed.title || 'feature-spec').trim();
+        const filename = String(localMd.filename || localMd.title || 'feature-spec').trim();
         const saved = saveFeatureMdLocally(filename, markdown, imagePaths);
 
         console.log(`[기능명세 MD] ${saved.filename} · 로컬 저장 완료: ${saved.localPath}`);
@@ -1547,7 +1785,7 @@ JSON 객체 1개만 출력하세요. 코드펜스 금지.
         res.end(JSON.stringify({
           ok: true,
           filename: saved.filename,
-          title: parsed.title || saved.filename,
+          title: localMd.title || saved.filename,
           localPath: saved.localPath,
           outputDir: saved.outputDir,
           assetDir: saved.assetDir,
