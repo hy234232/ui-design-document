@@ -899,9 +899,6 @@ async function createLabeledClone(sourceNodeId, features, fontFamily, blackStyle
   var cloneY = clone.y;
 
   var badges = [];
-  // anchor = 컴포넌트의 좌상단(top-left) 좌표. 뱃지의 우하단(bottom-right)이 anchor에 오도록 배치 →
-  // 뱃지가 컴포넌트의 위·왼쪽 외부에 통일된 위치로 놓여 컨텐츠를 가리지 않음.
-  var BADGE_GAP = 4; // 뱃지와 컴포넌트 사이 여백
   for (var i = 0; i < features.length; i++) {
     var f = features[i];
     var a = f && f.anchor;
@@ -909,16 +906,8 @@ async function createLabeledClone(sourceNodeId, features, fontFamily, blackStyle
     var rx = Math.max(0, Math.min(1, a.x));
     var ry = Math.max(0, Math.min(1, a.y));
     var badge = makePinkBadge(i + 1, fontFamily, blackStyle);
-    var anchorX = cloneX + rx * cloneW;
-    var anchorY = cloneY + ry * cloneH;
-    // 뱃지의 bottom-right = anchor (= 컴포넌트 top-left) - GAP. 단, 클론 영역 밖으로 음수 좌표가 되지 않도록 보호.
-    var bx = Math.round(anchorX - badge.width - BADGE_GAP);
-    var by = Math.round(anchorY - badge.height - BADGE_GAP);
-    // 음수 좌표 보호: 컴포넌트가 클론 최좌측/최상단에 붙어있으면 뱃지를 컴포넌트 안쪽 좌상단에 겹쳐 둠.
-    if (bx < cloneX) bx = Math.round(anchorX);
-    if (by < cloneY) by = Math.round(anchorY);
-    badge.x = bx;
-    badge.y = by;
+    badge.x = Math.round(cloneX + rx * cloneW - badge.width / 2);
+    badge.y = Math.round(cloneY + ry * cloneH - badge.height / 2);
     figma.currentPage.appendChild(badge);
     badges.push(badge);
   }
@@ -1368,868 +1357,8 @@ async function createPcWidthTypesBoard() {
   return 1;
 }
 
-
-async function getNodeByIdCompat(nodeId) {
-  if (!nodeId) return null;
-  try {
-    if (typeof figma.getNodeByIdAsync === 'function') return await figma.getNodeByIdAsync(nodeId);
-    if (typeof figma.getNodeById === 'function') return figma.getNodeById(nodeId);
-  } catch (e) { /* ignore */ }
-  return null;
-}
-
-function canHaveChildren(node) {
-  return !!node && 'children' in node && Array.isArray(node.children);
-}
-
-function walkNode(node, visit) {
-  if (!node) return;
-  visit(node);
-  if (canHaveChildren(node)) {
-    const children = node.children.slice();
-    for (const child of children) walkNode(child, visit);
-  }
-}
-
-function collectTextNodes(root) {
-  const out = [];
-  walkNode(root, function (node) {
-    if (node.type === 'TEXT') out.push(node);
-  });
-  return out;
-}
-
-async function safelySetText(node, value) {
-  if (!node || node.type !== 'TEXT') return false;
-  try {
-    const fontName = node.fontName;
-    if (fontName && fontName !== figma.mixed) await figma.loadFontAsync(fontName);
-    node.characters = value;
-    return true;
-  } catch (e) {
-    try {
-      await figma.loadFontAsync({ family: 'Inter', style: 'Regular' });
-      node.fontName = { family: 'Inter', style: 'Regular' };
-      node.characters = value;
-      return true;
-    } catch (e2) { return false; }
-  }
-}
-
-function nodeTextContent(node) {
-  const parts = [];
-  walkNode(node, function (n) {
-    if (n.type === 'TEXT' && n.characters) parts.push(String(n.characters));
-  });
-  return parts.join(' ');
-}
-
-function absBox(node) {
-  return node && node.absoluteBoundingBox ? node.absoluteBoundingBox : null;
-}
-
-function boxesIntersect(a, b) {
-  if (!a || !b) return false;
-  return !(
-    a.x + a.width < b.x ||
-    b.x + b.width < a.x ||
-    a.y + a.height < b.y ||
-    b.y + b.height < a.y
-  );
-}
-
-function boxCenter(box) {
-  return box ? { x: box.x + box.width / 2, y: box.y + box.height / 2 } : null;
-}
-
-function pointInBox(point, box) {
-  if (!point || !box) return false;
-  return (
-    point.x >= box.x &&
-    point.x <= box.x + box.width &&
-    point.y >= box.y &&
-    point.y <= box.y + box.height
-  );
-}
-
-function relativeAnchor(box, rootBox) {
-  const p = boxCenter(box);
-  if (!p || !rootBox || !rootBox.width || !rootBox.height) return null;
-  return {
-    x: Math.max(0, Math.min(1, (p.x - rootBox.x) / rootBox.width)),
-    y: Math.max(0, Math.min(1, (p.y - rootBox.y) / rootBox.height)),
-  };
-}
-
-const COMMENT_NODE_RE = /comment|annotation|annot|note|memo|sticky|pin|주석|코멘트|댓글|메모|설명|기획|정책|요구사항|참고/i;
-
-function stringifyAnnotationValue(value, depth) {
-  if (value === null || value === undefined || depth > 3) return '';
-  if (typeof value === 'string') return value.trim();
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
-  if (Array.isArray(value)) {
-    return value.map(v => stringifyAnnotationValue(v, depth + 1)).filter(Boolean).join(' / ');
-  }
-  if (typeof value === 'object') {
-    const preferred = ['text', 'description', 'body', 'content', 'label', 'title', 'name', 'value'];
-    const parts = [];
-    for (const key of preferred) {
-      if (value[key] !== undefined) {
-        const text = stringifyAnnotationValue(value[key], depth + 1);
-        if (text) parts.push(text);
-      }
-    }
-    if (parts.length) return parts.join(' / ');
-    return Object.keys(value)
-      .slice(0, 8)
-      .map(key => {
-        const text = stringifyAnnotationValue(value[key], depth + 1);
-        return text ? `${key}: ${text}` : '';
-      })
-      .filter(Boolean)
-      .join(' / ');
-  }
-  return '';
-}
-
-function readNativeAnnotations(node) {
-  const found = [];
-  const props = ['annotations', 'annotation'];
-  for (const prop of props) {
-    try {
-      const value = node && node[prop];
-      const text = stringifyAnnotationValue(value, 0);
-      if (text) found.push(text);
-    } catch (e) { /* property may not be available in this Figma runtime */ }
-  }
-  return found;
-}
-
-function isCommentLikeNode(node) {
-  if (!node) return false;
-  const name = String(node.name || '');
-  if (COMMENT_NODE_RE.test(name)) return true;
-  if (node.type === 'TEXT') {
-    const text = String(node.characters || '').trim();
-    return COMMENT_NODE_RE.test(text) || /^(TODO|NOTE|COMMENT|주석|코멘트|댓글|메모)\s*[:：-]/i.test(text);
-  }
-  return false;
-}
-
-function commentNodeText(node) {
-  if (!node) return '';
-  if (node.type === 'TEXT') return String(node.characters || '').trim();
-  const text = nodeTextContent(node).trim();
-  return text || String(node.name || '').trim();
-}
-
-function pushAnnotationItem(out, seen, item) {
-  const text = String(item && item.text || '').replace(/\s+/g, ' ').trim();
-  if (!text || text.length < 2) return;
-  const key = `${item.nodeId || ''}|${item.source || ''}|${text}`;
-  if (seen[key]) return;
-  seen[key] = true;
-  out.push(Object.assign({}, item, { text: text.slice(0, 500) }));
-}
-
-function collectAnnotationsForRoot(root, rootBox) {
-  const out = [];
-  const seen = {};
-  walkNode(root, function (node) {
-    const b = absBox(node);
-    const nativeTexts = readNativeAnnotations(node);
-    for (const text of nativeTexts) {
-      pushAnnotationItem(out, seen, {
-        source: 'figma-annotation',
-        nodeId: node.id,
-        nodeName: node.name,
-        nodeType: node.type,
-        text,
-        anchor: relativeAnchor(b, rootBox),
-      });
-    }
-    if (isCommentLikeNode(node)) {
-      pushAnnotationItem(out, seen, {
-        source: 'comment-layer',
-        nodeId: node.id,
-        nodeName: node.name,
-        nodeType: node.type,
-        text: commentNodeText(node),
-        anchor: relativeAnchor(b, rootBox),
-      });
-    }
-  });
-  return out.slice(0, 80);
-}
-
-function collectPageCommentNodesInSelection(selectionBounds, selectedRoots) {
-  if (!selectionBounds || !figma.currentPage || typeof figma.currentPage.findAll !== 'function') return [];
-  const roots = selectedRoots || [];
-  const out = [];
-  try {
-    const nodes = figma.currentPage.findAll(function (node) {
-      if (!isCommentLikeNode(node)) return false;
-      if (roots.some(root => isDescendantOf(node, root))) return false;
-      const b = absBox(node);
-      const center = boxCenter(b);
-      return !!(b && boxesIntersect(b, selectionBounds) && pointInBox(center, selectionBounds));
-    });
-    for (const node of nodes) out.push(node);
-  } catch (e) { /* page scan may be unavailable in some files */ }
-  return out.slice(0, 80);
-}
-
-function isDescendantOf(node, ancestor) {
-  let cur = node;
-  while (cur) {
-    if (cur === ancestor) return true;
-    cur = cur.parent;
-  }
-  return false;
-}
-
-function lowestCommonAncestor(nodes) {
-  if (!nodes.length) return null;
-  const chains = nodes.map(function (node) {
-    const arr = [];
-    let cur = node;
-    while (cur) { arr.unshift(cur); cur = cur.parent; }
-    return arr;
-  });
-  let common = null;
-  for (let i = 0; ; i++) {
-    const candidate = chains[0][i];
-    if (!candidate) break;
-    if (chains.every(chain => chain[i] === candidate)) common = candidate;
-    else break;
-  }
-  return common;
-}
-
-function findHeaderNodes(textNodes, page) {
-  const expected = new Set(['위험 단계', '현장 사진', '분류', '위치', '시간', '상태', '보고서']);
-  const esHeaders = page && page.emptyState && Array.isArray(page.emptyState.tableHeaders) ? page.emptyState.tableHeaders : [];
-  esHeaders.forEach(h => expected.add(String(h).trim()));
-  return textNodes.filter(function (node) {
-    const text = String(node.characters || '').trim();
-    return expected.has(text);
-  });
-}
-
-function findTableContainer(clone, headerNodes) {
-  if (!headerNodes.length) return clone;
-  let common = lowestCommonAncestor(headerNodes) || clone;
-  while (common && common !== clone) {
-    const b = absBox(common);
-    const cb = absBox(clone);
-    const text = nodeTextContent(common);
-    const hasHeaders = headerNodes.every(n => isDescendantOf(n, common));
-    if (hasHeaders && b && cb && b.width >= cb.width * 0.55 && b.height >= 180) return common;
-    common = common.parent;
-  }
-  const firstParent = headerNodes[0].parent;
-  if (firstParent && firstParent.parent && firstParent.parent !== figma.currentPage) return firstParent.parent;
-  return clone;
-}
-
-function nearestRemovableControl(node, root) {
-  let cur = node;
-  let best = node;
-  while (cur && cur.parent && cur.parent !== root && cur.parent !== figma.currentPage) {
-    const b = absBox(cur);
-    if (b && b.width <= 420 && b.height <= 90) best = cur;
-    cur = cur.parent;
-  }
-  return best;
-}
-
-function removeRiskAlertNoDataFilters(clone) {
-  const targets = [];
-  const texts = collectTextNodes(clone);
-  for (const textNode of texts) {
-    const text = String(textNode.characters || '').trim();
-    if (/^\d{4}-\d{2}-\d{2}/.test(text) || /카메라\s*전체/.test(text) || /위험\s*알림\s*분류/.test(text)) {
-      const target = nearestRemovableControl(textNode, clone);
-      if (target && target !== clone && !targets.includes(target)) targets.push(target);
-    }
-  }
-  for (const target of targets) {
-    try { target.remove(); } catch (e) { /* ignore */ }
-  }
-}
-
-function removeRowsBelowHeader(tableContainer, headerNodes) {
-  if (!tableContainer || !canHaveChildren(tableContainer) || !headerNodes.length) return null;
-  const tableBox = absBox(tableContainer);
-  if (!tableBox) return null;
-  let headerBottom = -Infinity;
-  for (const h of headerNodes) {
-    const b = absBox(h);
-    if (b) headerBottom = Math.max(headerBottom, b.y + b.height);
-  }
-  if (!isFinite(headerBottom)) return null;
-  const removeAfterY = headerBottom + 8;
-  // remove() 대신 visible=false — 인스턴스 내부 자식도 숨길 수 있음
-  function hideBelow(node) {
-    if (!node) return;
-    const b = absBox(node);
-    if (b && b.y >= removeAfterY) {
-      try { node.visible = false; } catch (e) {}
-      return;
-    }
-    if (canHaveChildren(node)) {
-      for (const child of node.children) hideBelow(child);
-    }
-  }
-  for (const child of tableContainer.children) hideBelow(child);
-  return {
-    x: tableBox.x,
-    y: removeAfterY,
-    width: tableBox.width,
-    height: Math.max(180, tableBox.y + tableBox.height - removeAfterY),
-  };
-}
-
-// 헤더 텍스트 없이도 테이블 행을 찾아 숨기는 범용 함수
-function hideGenericTableRows(root) {
-  function search(node, depth) {
-    if (!canHaveChildren(node) || depth > 8) return null;
-    // kids 와 box를 함께 묶어 인덱스 불일치 방지
-    const kidsWithBox = Array.from(node.children || [])
-      .map(k => ({ k, b: absBox(k) }))
-      .filter(x => x.b);
-
-    if (kidsWithBox.length >= 3) {
-      const freq = {};
-      kidsWithBox.forEach(({ b }) => {
-        const h = Math.round(b.height);
-        freq[h] = (freq[h] || 0) + 1;
-      });
-      const dominantH = Number(Object.keys(freq).sort((a, b) => freq[b] - freq[a])[0]);
-      const rowItems = kidsWithBox.filter(({ b }) => Math.round(b.height) === dominantH);
-
-      if (rowItems.length >= 3 && dominantH >= 28 && dominantH <= 120) {
-        rowItems.sort((a, b) => a.b.y - b.b.y);
-
-        // 첫 번째 = 헤더 or 첫 번째 데이터행; 나머지는 모두 숨김
-        const firstRow = rowItems[0];
-        for (let i = 1; i < rowItems.length; i++) {
-          try { rowItems[i].k.visible = false; } catch (e) {}
-        }
-
-        return {
-          x: firstRow.b.x,
-          y: firstRow.b.y + firstRow.b.height,
-          width: Math.max(...rowItems.map(r => r.b.width)),
-          height: Math.max(180, rowItems[rowItems.length - 1].b.y + rowItems[rowItems.length - 1].b.height - firstRow.b.y - firstRow.b.height),
-        };
-      }
-    }
-
-    for (const { k } of kidsWithBox) {
-      const result = search(k, depth + 1);
-      if (result) return result;
-    }
-    return null;
-  }
-  return search(root, 0);
-}
-
-function findDesignSystemNoDataNode(excludeRoot) {
-  const RE = /no[\s\-_]*data|nodata|empty[\s\-_]*state|emptystate|데이터\s*없|빈\s*상태|없음|없어요|no[\s\-_]*alert|알림\s*없/i;
-  try {
-    // 1순위: COMPONENT 타입 (마스터 컴포넌트)
-    const comp = figma.root.findOne(function (node) {
-      if (!node || node === excludeRoot || isDescendantOf(node, excludeRoot)) return false;
-      if (node.type !== 'COMPONENT') return false;
-      return RE.test(String(node.name || ''));
-    });
-    if (comp) return comp;
-
-    // 2순위: INSTANCE / FRAME / GROUP (라이브러리 컴포넌트 인스턴스 등)
-    return figma.root.findOne(function (node) {
-      if (!node || node === excludeRoot || isDescendantOf(node, excludeRoot)) return false;
-      if (!['INSTANCE', 'FRAME', 'GROUP'].includes(node.type)) return false;
-      return RE.test(String(node.name || ''));
-    });
-  } catch (e) { return null; }
-}
-
-async function createFallbackNoDataComponent(message) {
-  const fontFamily = await loadFonts();
-  const semiboldStyle = fontFamily === 'Pretendard' ? 'SemiBold' : 'Bold';
-  const frame = figma.createFrame();
-  frame.name = 'No Data';
-  frame.resize(180, 72);
-  frame.fills = [];
-  frame.clipsContent = false;
-
-  const icon = figma.createFrame();
-  icon.name = 'No Data Icon';
-  icon.resize(36, 36);
-  icon.x = 72;
-  icon.y = 0;
-  icon.fills = [];
-  icon.clipsContent = false;
-  frame.appendChild(icon);
-
-  const bellBody = figma.createRectangle();
-  bellBody.name = 'Bell Body';
-  bellBody.resize(22, 24);
-  bellBody.x = 7;
-  bellBody.y = 8;
-  bellBody.cornerRadius = 9;
-  bellBody.fills = solid('#c7d2e3');
-  icon.appendChild(bellBody);
-
-  const bellTop = figma.createEllipse();
-  bellTop.name = 'Bell Top';
-  bellTop.resize(8, 8);
-  bellTop.x = 14;
-  bellTop.y = 3;
-  bellTop.fills = solid('#c7d2e3');
-  icon.appendChild(bellTop);
-
-  const clapper = figma.createEllipse();
-  clapper.name = 'Bell Clapper';
-  clapper.resize(8, 5);
-  clapper.x = 14;
-  clapper.y = 30;
-  clapper.fills = solid('#c7d2e3');
-  icon.appendChild(clapper);
-
-  const label = makeText(message || '데이터가 없어요.', 16, fontFamily, semiboldStyle, '#66748a', {});
-  label.name = 'Empty Message';
-  label.x = Math.round((180 - label.width) / 2);
-  label.y = 48;
-  frame.appendChild(label);
-  return frame;
-}
-
-function deriveNoDataMessage(clone, page) {
-  if (page && page.emptyState && page.emptyState.mainMessage) return page.emptyState.mainMessage;
-  const texts = collectTextNodes(clone).map(n => String(n.characters || '').trim()).filter(Boolean);
-  if (texts.includes('위험 알림 목록') || /위험\s*알림/.test(clone.name || '')) return '위험 알림이 없어요.';
-  const title = texts.find(t => /목록$/.test(t)) || texts.find(t => t.length <= 20 && !/^전체\s*\d+/.test(t));
-  if (title) return title.replace(/\s*목록$/, '') + '이 없어요.';
-  return '데이터가 없어요.';
-}
-
-function isInsideInstance(node) {
-  let n = node;
-  while (n && n.type !== 'PAGE') {
-    if (n.type === 'INSTANCE') return true;
-    n = n.parent;
-  }
-  return false;
-}
-
-function readInstanceProps(node) {
-  if (!node || node.type !== 'INSTANCE') return null;
-  try { return node.componentProperties || null; } catch (e) { return null; }
-}
-
-function instanceNameText(node) {
-  const parts = [];
-  let n = node;
-  while (n && n.type !== 'PAGE') {
-    if (n.name) parts.push(String(n.name));
-    n = n.parent;
-  }
-  return parts.join(' ').toLowerCase();
-}
-
-function isTableLikeInstance(node) {
-  const ownName = String(node && node.name || '').toLowerCase();
-  if (/data\s*table|datatable|table\s*main/.test(ownName)) return true;
-  const props = readInstanceProps(node);
-  if (!props) return false;
-  const values = Object.values(props).map(function (p) { return String(p && p.value || '').toLowerCase(); }).join(' ');
-  const text = nodeTextContent(node);
-  return /기본|default/.test(values) && /위험\s*단계|현장\s*사진|보고서|다운로드|분류/.test(text);
-}
-
-function isNoDataSwitchableInstance(node) {
-  if (!node || node.type !== 'INSTANCE' || typeof node.setProperties !== 'function') return false;
-  const ownName = String(node.name || '').toLowerCase();
-  if (/no\s*data|nodata|empty/.test(ownName)) return false;
-  if (/data\s*table|datatable|table\s*main|danger\s*alert\s*filter|filter\s*bar/.test(ownName)) return true;
-  const props = readInstanceProps(node);
-  if (!props) return false;
-  const values = Object.values(props).map(function (p) { return String(p && p.value || '').toLowerCase(); }).join(' ');
-  if (/위험알림/.test(values)) return true;
-  if (/기본|default/.test(values) && /위험\s*단계|현장\s*사진|보고서|다운로드|분류/.test(nodeTextContent(node))) return true;
-  return false;
-}
-
-async function trySetInstanceNoDataVariant(node) {
-  const props = readInstanceProps(node);
-  if (!props || typeof node.setProperties !== 'function') return false;
-  const preferredKeys = [];
-  const fallbackKeys = [];
-  for (const key of Object.keys(props)) {
-    const value = String(props[key] && props[key].value || '');
-    const keyText = String(key).toLowerCase();
-    if (/속성\s*1|variant|state|status|type|상태|종류/.test(keyText)) preferredKeys.push(key);
-    else if (/기본|default|위험알림/.test(value)) fallbackKeys.push(key);
-  }
-  const keys = preferredKeys.concat(fallbackKeys).filter(function (key, idx, arr) { return arr.indexOf(key) === idx; });
-  for (const key of keys) {
-    for (const value of ['no data', 'No Data', 'nodata']) {
-      try {
-        node.setProperties({ [key]: value });
-        return true;
-      } catch (e) { /* try next */ }
-    }
-  }
-  return false;
-}
-
-async function switchNoDataVariants(root) {
-  const instances = [];
-  walkNode(root, function (node) {
-    if (isNoDataSwitchableInstance(node)) instances.push(node);
-  });
-  let anyChanged = false;
-  let tableChanged = false;
-  for (const inst of instances) {
-    const wasTable = isTableLikeInstance(inst);
-    const changed = await trySetInstanceNoDataVariant(inst);
-    if (changed) {
-      anyChanged = true;
-      if (wasTable) tableChanged = true;
-    }
-  }
-  return { anyChanged, tableChanged };
-}
-
-function findSafeWritableParent(startNode, rootFallback) {
-  let n = startNode;
-  while (n && n.type !== 'PAGE') {
-    if (n.type !== 'INSTANCE' && !isInsideInstance(n) && canHaveChildren(n)) return n;
-    n = n.parent;
-  }
-  return rootFallback || figma.currentPage;
-}
-
-function safeNodeProp(node, prop, fallback) {
-  try { return node[prop]; } catch (e) { return fallback; }
-}
-
-function findPageFrameForNoData(node) {
-  if (!node) return null;
-  const b0 = absBox(node);
-  let cur = node;
-  let best = null;
-  while (cur) {
-    let curType;
-    try { curType = cur.type; } catch (e) { break; }
-    if (curType === 'PAGE') break;
-    const b = absBox(cur);
-    const name = String(safeNodeProp(cur, 'name', '') || '').toLowerCase();
-    const isContainer = ['FRAME', 'SECTION', 'COMPONENT', 'INSTANCE', 'GROUP'].includes(curType);
-    const looksLikeScreen = /screen|page|frame|화면|페이지|목록|위험\s*알림|pc웹|desktop/.test(name);
-    const largeEnough = b && (!b0 || (b.width >= Math.max(900, b0.width * 1.5) && b.height >= Math.max(500, b0.height * 1.5)));
-    if (isContainer && b && (looksLikeScreen || largeEnough)) best = cur;
-    let parent;
-    try { parent = cur.parent; } catch (e) { break; }
-    cur = parent;
-  }
-  return best || node;
-}
-
-function selectedPageFrameId(node) {
-  let target = null;
-  try { target = findPageFrameForNoData(node); } catch (e) { target = null; }
-  try { if (target && target.id) return target.id; } catch (e) { /* ignore */ }
-  try { if (node && node.id) return node.id; } catch (e) { /* ignore */ }
-  return null;
-}
-
-async function drawNoDataFromSelectedFrame(page, index, total, sourceNodeId) {
-  // 인스턴스 서브레이어 ID ("I<n>:<n>;<n>:<n>") 는 .name 등 접근 시 Figma가 에러를 던지므로 즉시 제거
-  function isInstanceSublayerId(id) {
-    return typeof id === 'string' && /^I\d/.test(id) && id.includes(';');
-  }
-  if (isInstanceSublayerId(sourceNodeId)) sourceNodeId = null;
-
-  let source = null;
-  if (sourceNodeId) {
-    source = await getNodeByIdCompat(sourceNodeId);
-    // 반환된 노드가 실제 접근 가능한지 검증
-    if (source) {
-      try { void source.type; void source.parent; } catch (e) { source = null; }
-    }
-  }
-
-  // 여전히 null이면 현재 선택 노드로 폴백 (단, 인스턴스 서브레이어 제외)
-  if (!source) {
-    const sel = figma.currentPage.selection;
-    for (let i = 0; i < (sel ? sel.length : 0); i++) {
-      try {
-        const n = sel[i];
-        void n.type; void n.parent; // 접근 검증
-        const nid = n.id;
-        if (!isInstanceSublayerId(nid)) { source = n; break; }
-      } catch (e) { /* skip */ }
-    }
-  }
-
-  try { source = findPageFrameForNoData(source); } catch (e) { source = null; }
-  // 선택된 source가 실제 복제 가능한지 최종 검증
-  if (source) {
-    try { void source.type; } catch (e) { source = null; }
-  }
-  if (!source || typeof source.clone !== 'function') return drawEmptyStateMockup(page, index, total);
-
-  // detachInstance() 금지 — 원본 컴포넌트의 배경·색상이 모두 날아가기 때문
-  // 인스턴스인 채로 clone 유지; visible=false 는 인스턴스 자식에도 동작함
-  const clone = source.clone();
-  const sourceName = safeNodeProp(source, 'name', '선택 화면');
-  clone.name = (sourceName || '선택 화면') + ' / 데이터 없음';
-  const sourceBox = absBox(source);
-  const PAGE_GAP = 120;
-  if (sourceBox) {
-    clone.x = safeNodeProp(source, 'x', 0) + (index + 1) * (sourceBox.width + PAGE_GAP);
-    clone.y = safeNodeProp(source, 'y', 0);
-  } else {
-    clone.x = safeNodeProp(source, 'x', 0) + 1560 + index * 1560;
-    clone.y = safeNodeProp(source, 'y', 0);
-  }
-  figma.currentPage.appendChild(clone);
-
-  // 카운트 숫자 0으로 초기화 (텍스트 오버라이드 — 인스턴스에서도 허용됨)
-  const textNodes = collectTextNodes(clone);
-  for (const textNode of textNodes) {
-    const oldText = String(textNode.characters || '');
-    const nextText = oldText.replace(/(전체\s*)\d+/g, '$10');
-    if (nextText !== oldText) await safelySetText(textNode, nextText);
-  }
-
-  // 디자인시스템 컴포넌트가 default/no data variant를 제공하면 variant 변경이 정답이다.
-  const switched = await switchNoDataVariants(clone);
-  if (switched.tableChanged) {
-    figma.notify('✓ Data Table Main variant를 no data로 변경했습니다.', { timeout: 3000 });
-    return clone;
-  }
-
-  removeRiskAlertNoDataFilters(clone);
-
-  // variant 변경에 실패한 경우에만 데이터 행 숨김 fallback 수행
-  const refreshedTexts = collectTextNodes(clone);
-  const headerNodes = findHeaderNodes(refreshedTexts, page);
-  const tableContainer = findTableContainer(clone, headerNodes);
-  let bodyBox = removeRowsBelowHeader(tableContainer, headerNodes);
-  if (!bodyBox) bodyBox = hideGenericTableRows(clone);
-
-  // bodyBox 폴백: clone 하단 65% 영역
-  if (!bodyBox) {
-    const cb = absBox(clone) || { x: clone.x, y: clone.y, width: clone.width, height: clone.height };
-    bodyBox = { x: cb.x, y: cb.y + cb.height * 0.35, width: cb.width, height: cb.height * 0.65 };
-  }
-
-  // no-data 노드 생성 (디자인시스템 컴포넌트 우선, 없으면 fallback)
-  let noDataNode = null;
-  const designNode = findDesignSystemNoDataNode(clone);
-  if (designNode && typeof designNode.clone === 'function') {
-    try {
-      noDataNode = designNode.clone();
-      figma.notify(`✓ 디자인시스템 컴포넌트 사용: "${designNode.name}"`, { timeout: 3000 });
-    } catch (e) { noDataNode = null; }
-  }
-  if (!noDataNode) {
-    noDataNode = await createFallbackNoDataComponent(deriveNoDataMessage(clone, page));
-    figma.notify('⚠ 디자인시스템에서 no-data 컴포넌트를 찾지 못해 기본 컴포넌트를 사용합니다.', { timeout: 4000 });
-  }
-  noDataNode.name = 'No Data';
-
-  // noDataNode는 페이지 루트에 부착 후 bodyBox 절대 좌표 중앙에 배치
-  figma.currentPage.appendChild(noDataNode);
-
-  const ndW = noDataNode.width || 180;
-  const ndH = noDataNode.height || 72;
-  // bodyBox가 너무 작으면 clone 전체 기준으로 폴백
-  const useBox = (bodyBox && bodyBox.width > ndW * 1.5 && bodyBox.height > ndH * 1.5)
-    ? bodyBox
-    : { x: clone.x, y: clone.y + clone.height * 0.35, width: clone.width, height: clone.height * 0.65 };
-  noDataNode.x = Math.round(useBox.x + (useBox.width - ndW) / 2);
-  noDataNode.y = Math.round(useBox.y + (useBox.height - ndH) / 2);
-
-  // clone + noDataNode를 그룹으로 묶어 함께 이동 가능하게
-  try {
-    const group = figma.group([clone, noDataNode], figma.currentPage);
-    group.name = clone.name;
-    return group;
-  } catch (e) {
-    return clone;
-  }
-}
-
-async function drawEmptyStateMockup(page, index, total) {
-  // 빈 상태 목업 — 기존 drawExceptionPage와 동일한 flat 구조 (wrapper에 직접 append)
-  var es = page.emptyState || {};
-  var fontFamily = await loadFonts();
-  var boldStyle = 'Bold';
-  var regularStyle = 'Regular';
-
-  var W = 1440;
-  var PAD = 56;
-  var PAGE_GAP = 120;
-  var SIDEBAR_W = 72;
-  var totalW = total * W + Math.max(0, total - 1) * PAGE_GAP;
-
-  // ── 최상위 wrapper ──
-  var wrapper = figma.createFrame();
-  wrapper.name = es.screenTitle || page.title || '데이터없는 페이지';
-  wrapper.resize(W, 900);
-  wrapper.x = Math.round(figma.viewport.center.x - totalW / 2 + index * (W + PAGE_GAP));
-  wrapper.y = Math.round(figma.viewport.center.y - 450);
-  wrapper.fills = solid('#f5f6fa');
-  wrapper.clipsContent = false;
-  figma.currentPage.appendChild(wrapper);
-
-  // ── TopBar (다크) ──
-  var topBar = figma.createRectangle();
-  topBar.name = 'TopBar';
-  topBar.resize(W, 56);
-  topBar.x = 0; topBar.y = 0;
-  topBar.fills = solid('#111827');
-  wrapper.appendChild(topBar);
-
-  // ── 사이드바 ──
-  var sidebar = figma.createRectangle();
-  sidebar.name = 'Sidebar';
-  sidebar.resize(SIDEBAR_W, 844);
-  sidebar.x = 0; sidebar.y = 56;
-  sidebar.fills = solid('#1f2937');
-  wrapper.appendChild(sidebar);
-
-  // ── 콘텐츠 배경 ──
-  var contentBg = figma.createRectangle();
-  contentBg.name = 'ContentBg';
-  contentBg.resize(W - SIDEBAR_W, 844);
-  contentBg.x = SIDEBAR_W; contentBg.y = 56;
-  contentBg.fills = solid('#f5f6fa');
-  wrapper.appendChild(contentBg);
-
-  var CX = SIDEBAR_W;   // 콘텐츠 시작 x
-  var cy = 56 + 32;     // 콘텐츠 시작 y (topBar + padding)
-
-  // 페이지 제목
-  var pageTitle = makeText(es.screenTitle || '목록', 28, fontFamily, boldStyle, '#111827', { width: W - CX - PAD * 2 });
-  pageTitle.x = CX + PAD; pageTitle.y = cy;
-  wrapper.appendChild(pageTitle);
-  cy += pageTitle.height + 20;
-
-  // 탭 바 배경선
-  var tabs = Array.isArray(es.tabs) ? es.tabs : [];
-  if (tabs.length) {
-    var tabBg = figma.createRectangle();
-    tabBg.name = 'TabBg';
-    tabBg.resize(W - CX, 44);
-    tabBg.x = CX; tabBg.y = cy;
-    tabBg.fills = solid('#ffffff');
-    tabBg.strokes = solid('#e5e7eb');
-    tabBg.strokeWeight = 1;
-    wrapper.appendChild(tabBg);
-
-    var tx = CX + PAD;
-    for (var ti = 0; ti < tabs.length; ti++) {
-      var isActive = ti === 0;
-      var tabT = makeText(tabs[ti], 14, fontFamily, isActive ? boldStyle : regularStyle,
-        isActive ? '#111827' : '#9ca3af', {});
-      tabT.x = tx; tabT.y = cy + 12;
-      wrapper.appendChild(tabT);
-      if (isActive) {
-        var uline = figma.createRectangle();
-        uline.resize(tabT.width, 2);
-        uline.x = tx; uline.y = cy + 42;
-        uline.fills = solid('#111827');
-        wrapper.appendChild(uline);
-      }
-      tx += tabT.width + 28;
-    }
-    cy += 44 + 8;
-  }
-
-  // 카운트 텍스트
-  var countText = makeText('전체  0', 14, fontFamily, regularStyle, '#6b7280', {});
-  countText.x = CX + PAD; countText.y = cy + 8;
-  wrapper.appendChild(countText);
-  cy += 36;
-
-  // 테이블 헤더
-  var headers = Array.isArray(es.tableHeaders) ? es.tableHeaders : [];
-  if (headers.length) {
-    var thBg = figma.createRectangle();
-    thBg.name = 'TableHeaderBg';
-    thBg.resize(W - CX, 44);
-    thBg.x = CX; thBg.y = cy;
-    thBg.fills = solid('#f9fafb');
-    thBg.strokes = solid('#e5e7eb');
-    thBg.strokeWeight = 1;
-    wrapper.appendChild(thBg);
-
-    var colW = Math.floor((W - CX - PAD) / headers.length);
-    for (var hi = 0; hi < headers.length; hi++) {
-      var th = makeText(headers[hi], 13, fontFamily, regularStyle, '#9ca3af', { width: colW - 8 });
-      th.x = CX + PAD + hi * colW; th.y = cy + 14;
-      wrapper.appendChild(th);
-    }
-    cy += 44;
-  }
-
-  // 빈 상태 흰 배경
-  var emptyBg = figma.createRectangle();
-  emptyBg.name = 'EmptyBg';
-  emptyBg.resize(W - CX, 900 - cy);
-  emptyBg.x = CX; emptyBg.y = cy;
-  emptyBg.fills = solid('#ffffff');
-  wrapper.appendChild(emptyBg);
-
-  // 아이콘 배경 원 (rectangle으로 대체, cornerRadius = 반지름)
-  var ICON_SIZE = 96;
-  var iconX = Math.round(CX + (W - CX) / 2 - ICON_SIZE / 2);
-  var iconY = Math.round(cy + (900 - cy) / 2 - ICON_SIZE / 2) - 30;
-  var iconBg = figma.createRectangle();
-  iconBg.name = 'IconBg';
-  iconBg.resize(ICON_SIZE, ICON_SIZE);
-  iconBg.x = iconX; iconBg.y = iconY;
-  iconBg.fills = solid('#f0f2f5');
-  iconBg.cornerRadius = ICON_SIZE / 2;
-  wrapper.appendChild(iconBg);
-
-  // 아이콘 텍스트
-  var iconText = makeText(es.icon || '📋', 36, fontFamily, regularStyle, '#c5ccd8', {});
-  iconText.x = Math.round(iconX + ICON_SIZE / 2 - iconText.width / 2);
-  iconText.y = Math.round(iconY + ICON_SIZE / 2 - iconText.height / 2);
-  wrapper.appendChild(iconText);
-
-  // 메인 메시지
-  var mainMsg = makeText(es.mainMessage || '데이터가 없어요.', 18, fontFamily, boldStyle, '#9ca3af', {});
-  mainMsg.x = Math.round(CX + (W - CX) / 2 - mainMsg.width / 2);
-  mainMsg.y = iconY + ICON_SIZE + 20;
-  wrapper.appendChild(mainMsg);
-
-  // 보조 메시지
-  if (es.subMessage) {
-    var subMsg = makeText(es.subMessage, 14, fontFamily, regularStyle, '#c5ccd8', { width: 400 });
-    subMsg.x = Math.round(CX + (W - CX) / 2 - subMsg.width / 2);
-    subMsg.y = mainMsg.y + mainMsg.height + 10;
-    wrapper.appendChild(subMsg);
-  }
-
-  return wrapper;
-}
-
-async function drawExceptionPage(page, index = 0, total = 1, sourceNodeId) {
+async function drawExceptionPage(page) {
   page = page || {};
-
-  // 데이터없는 페이지는 선택 화면을 복제한 뒤 row만 제거하고 no data 컴포넌트를 삽입한다.
-  if (page.type === 'empty') {
-    return drawNoDataFromSelectedFrame(page, index, total, sourceNodeId);
-  }
-
   const sections = Array.isArray(page.sections) ? page.sections : [];
   const fontFamily = await loadFonts();
   const boldStyle = 'Bold';
@@ -2239,12 +1368,10 @@ async function drawExceptionPage(page, index = 0, total = 1, sourceNodeId) {
   const W = 1440;
   const PAD = 56;
   const GAP = 24;
-  const PAGE_GAP = 120;
-  const totalW = total * W + Math.max(0, total - 1) * PAGE_GAP;
   const wrapper = figma.createFrame();
   wrapper.name = page.title || '예외 케이스 페이지';
   wrapper.resize(W, 900);
-  wrapper.x = Math.round(figma.viewport.center.x - totalW / 2 + index * (W + PAGE_GAP));
+  wrapper.x = Math.round(figma.viewport.center.x - W / 2);
   wrapper.y = Math.round(figma.viewport.center.y - 450);
   wrapper.fills = solid('#f4f6fb');
   wrapper.strokes = solid('#d6dbe7');
@@ -2372,7 +1499,9 @@ async function drawExceptionPage(page, index = 0, total = 1, sourceNodeId) {
   }
 
   wrapper.resize(W, y + PAD);
-  return wrapper;
+  figma.currentPage.selection = [wrapper];
+  figma.viewport.scrollAndZoomIntoView([wrapper]);
+  return wrapper.id;
 }
 
 async function createMdShortcutPill(url, sourceNodeId, filename) {
@@ -2566,24 +1695,15 @@ async function createSpecOnCanvas(features, selectionBounds, overview, meta, sou
     }
     const nameText = makeText(f.feature, 24, fontFamily, boldStyle, '#ffffff', { letterSpacing: -0.48 });
     nameText.x = fNameStartX;
-    const hdrH0 = Math.max(24, nameText.height);
-    wrapper.appendChild(nameText);
-
-    // docLink pill — 기능명 우측에 인라인 배치
-    let fPill = null;
-    if (f.docLink && f.docLink.url) {
-      fPill = makeDocLinkPill(f.docLink, fontFamily, boldStyle);
-      if (fPill) {
-        fPill.x = nameText.x + nameText.width + 12;
-        wrapper.appendChild(fPill);
-      }
-    }
-    const hdrH = Math.max(hdrH0, fPill ? fPill.height : 0);
+    const hdrH = Math.max(24, nameText.height);
     nameText.y = y + Math.round((hdrH - nameText.height) / 2);
+    wrapper.appendChild(nameText);
     if (fTagBadge) fTagBadge.y = y + Math.round((hdrH - fTagBadge.height) / 2);
-    if (fPill) fPill.y = y + Math.round((hdrH - fPill.height) / 2);
 
     y += hdrH + HDR_GAP;
+
+    // ②-1 docLink (있을 때만)
+    y = addDocLinkRow(wrapper, f.docLink, y, PAD, contentWidth, fontFamily, regularStyle);
 
     // ③ FE 행
     y = addTaskRow(wrapper, 'FE', f.fe, y, PAD, contentWidth, fontFamily, boldStyle, regularStyle, {
@@ -2709,24 +1829,16 @@ async function createSpecOnCanvas(features, selectionBounds, overview, meta, sou
       const nameStr = categoryPrefix + (f.devTitle || f.feature || '항목') + note;
       const nameText = makeText(nameStr, 24, fontFamily, boldStyle, '#ffffff', { letterSpacing: -0.48 });
       nameText.x = nameStartX;
-      const hdrH2base = Math.max(24, nameText.height);
-      wrapper.appendChild(nameText);
-
-      // docLink pill — 항목명 우측에 인라인 배치
-      let sPill = null;
-      if (f.docLink && f.docLink.url) {
-        sPill = makeDocLinkPill(f.docLink, fontFamily, boldStyle);
-        if (sPill) {
-          sPill.x = nameText.x + nameText.width + 12;
-          wrapper.appendChild(sPill);
-        }
-      }
-      const hdrH2 = Math.max(hdrH2base, sPill ? sPill.height : 0);
+      const hdrH2 = Math.max(24, nameText.height);
       nameText.y = y + Math.round((hdrH2 - nameText.height) / 2);
+      wrapper.appendChild(nameText);
+      // tag 뱃지 수직 중앙 정렬
       if (tagBadge) tagBadge.y = y + Math.round((hdrH2 - tagBadge.height) / 2);
-      if (sPill) sPill.y = y + Math.round((hdrH2 - sPill.height) / 2);
 
       y += hdrH2 + HDR_GAP;
+
+      // ③-0 docLink (있을 때만)
+      y = addDocLinkRow(wrapper, f.docLink, y, PAD, contentWidth, fontFamily, regularStyle);
 
       // ③ FE
       y = addTaskRow(wrapper, 'FE', f.fe || f.problem || '', y, PAD, contentWidth, fontFamily, boldStyle, regularStyle, {
@@ -2792,10 +1904,8 @@ figma.ui.onmessage = async (msg) => {
       const sel = figma.currentPage.selection;
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
       const selectionNodeIds = [];
-      const selectionPageFrameIds = [];
       for (const node of sel) {
         selectionNodeIds.push(node.id);
-        selectionPageFrameIds.push(selectedPageFrameId(node));
         const b = node.absoluteBoundingBox;
         if (!b) continue;
         minX = Math.min(minX, b.x);
@@ -2809,43 +1919,7 @@ figma.ui.onmessage = async (msg) => {
 
       // frameData에도 각 노드 id 첨부 (UI → draw-spec 경유로 복제 대상 식별)
       for (let i = 0; i < frames.length && i < selectionNodeIds.length; i++) {
-        frames[i].nodeId = selectionPageFrameIds[i] || selectionNodeIds[i];
-        frames[i].selectedNodeId = selectionNodeIds[i];
-      }
-
-      // ── 선택 영역 내 코멘트/주석 수집 ──
-      // Figma 일반 댓글 API는 플러그인 런타임에서 제한될 수 있으므로,
-      // 접근 가능한 Dev annotation 속성과 선택 영역 내부의 주석성 레이어/메모 노드를 함께 읽는다.
-      // 선택 영역 밖의 코멘트/주석은 문서 생성 맥락에 섞지 않는다.
-      for (let i = 0; i < frames.length && i < sel.length; i++) {
-        const rootBox = sel[i].absoluteBoundingBox || selectionBounds;
-        frames[i].annotations = collectAnnotationsForRoot(sel[i], rootBox);
-      }
-      const pageCommentNodes = collectPageCommentNodesInSelection(selectionBounds, sel);
-      for (const commentNode of pageCommentNodes) {
-        const cb = absBox(commentNode);
-        const item = {
-          source: 'comment-layer-in-selection',
-          nodeId: commentNode.id,
-          nodeName: commentNode.name,
-          nodeType: commentNode.type,
-          text: commentNodeText(commentNode),
-        };
-        let attached = false;
-        for (let i = 0; i < frames.length && i < sel.length; i++) {
-          const rootBox = sel[i].absoluteBoundingBox || selectionBounds;
-          const center = boxCenter(cb);
-          if (pointInBox(center, rootBox) || boxesIntersect(cb, rootBox)) {
-            frames[i].annotations = frames[i].annotations || [];
-            frames[i].annotations.push(Object.assign({}, item, { anchor: relativeAnchor(cb, rootBox) }));
-            attached = true;
-            break;
-          }
-        }
-        if (!attached && frames[0]) {
-          frames[0].annotations = frames[0].annotations || [];
-          frames[0].annotations.push(Object.assign({}, item, { anchor: relativeAnchor(cb, selectionBounds) }));
-        }
+        frames[i].nodeId = selectionNodeIds[i];
       }
 
       // ── 화면 이미지 내보내기 (비전 분석용) ──
@@ -2873,8 +1947,7 @@ figma.ui.onmessage = async (msg) => {
         type: 'selection-data',
         data: frames,
         selectionBounds,
-        selectionNodeIds: selectionPageFrameIds,
-        rawSelectionNodeIds: selectionNodeIds,
+        selectionNodeIds,
         previousFeatures: history.featureNames || [],
         historyPageCount: (history.pages || []).length,
       });
@@ -2896,30 +1969,11 @@ figma.ui.onmessage = async (msg) => {
   }
 
   if (msg.type === 'draw-exception-page') {
-    const pages = Array.isArray(msg.pages) && msg.pages.length
-      ? msg.pages
-      : (msg.page ? [msg.page] : []);
-    if (!pages.length) {
-      figma.ui.postMessage({ type: 'error', message: '생성할 예외 케이스 페이지가 없습니다.' });
-    } else {
-      const nodes = [];
-      const errors = [];
-      for (let i = 0; i < pages.length; i++) {
-        try {
-          const node = await drawExceptionPage(pages[i], i, pages.length, msg.sourceNodeId);
-          if (node) nodes.push(node);
-        } catch (e) {
-          errors.push(`${pages[i].title || pages[i].type}: ${e.message}`);
-        }
-      }
-      if (nodes.length) {
-        try { figma.currentPage.selection = nodes; } catch (e) {}
-        try { figma.viewport.scrollAndZoomIntoView(nodes); } catch (e) {}
-        const errMsg = errors.length ? ` (일부 실패: ${errors.join(', ')})` : '';
-        figma.ui.postMessage({ type: 'exception-page-drawn', nodeId: nodes[0].id, count: nodes.length, warning: errMsg });
-      } else {
-        figma.ui.postMessage({ type: 'error', message: '예외 케이스 페이지 그리기 실패: ' + errors.join('; ') });
-      }
+    try {
+      const nodeId = await drawExceptionPage(msg.page);
+      figma.ui.postMessage({ type: 'exception-page-drawn', nodeId });
+    } catch (e) {
+      figma.ui.postMessage({ type: 'error', message: '예외 케이스 페이지 그리기 실패: ' + e.message });
     }
   }
 
@@ -2966,40 +2020,22 @@ figma.ui.onmessage = async (msg) => {
         figma.ui.postMessage({ type: 'error', message: '컴포넌트(또는 컴포넌트셋)를 1개 선택해주세요.' });
         return;
       }
-      const componentNodes = sel.filter(n => n.type === 'COMPONENT' || n.type === 'COMPONENT_SET' || n.type === 'INSTANCE');
-      if (!componentNodes.length || componentNodes.length !== sel.length) {
-        const bad = sel.find(n => n.type !== 'COMPONENT' && n.type !== 'COMPONENT_SET' && n.type !== 'INSTANCE');
-        figma.ui.postMessage({ type: 'error', message: '선택된 항목이 컴포넌트(COMPONENT / COMPONENT_SET / INSTANCE)가 아닙니다. 현재 타입: ' + (bad ? bad.type : 'UNKNOWN') });
+      const node = sel[0];
+      const t = node.type;
+      if (t !== 'COMPONENT' && t !== 'COMPONENT_SET' && t !== 'INSTANCE') {
+        figma.ui.postMessage({ type: 'error', message: '선택된 항목이 컴포넌트(COMPONENT / COMPONENT_SET / INSTANCE)가 아닙니다. 현재 타입: ' + t });
         return;
       }
-      const node = componentNodes[0];
-      const t = node.type;
-      const isMultiComponentSelection = componentNodes.length > 1;
-      const commonName = (() => {
-        if (!isMultiComponentSelection) return node.name;
-        const names = componentNodes.map(n => String(n.name || '').trim()).filter(Boolean);
-        if (!names.length) return node.name;
-        const cleaned = names.map(name => name
-          .replace(/\s*[,/|·-]?\s*(state|status|type|variant)\s*=\s*[^,/|]+/ig, '')
-          .replace(/\s*[,/|·-]?\s*(default|hover|pressed|active|disabled|focus|focused)\s*$/ig, '')
-          .trim());
-        const first = cleaned[0] || names[0];
-        return cleaned.every(name => name && name === first) ? first : names[0].split(/[\/,|]/)[0].trim();
-      })();
 
       // 컴포넌트 데이터 수집
       const compData = {
-        name: commonName || node.name,
+        name: node.name,
         projectName: (figma.root && figma.root.name) ? figma.root.name : '',
         pageName: (figma.currentPage && figma.currentPage.name) ? figma.currentPage.name : '',
         fileKey: (typeof figma.fileKey === 'string' && figma.fileKey) ? figma.fileKey : '',
-        type: isMultiComponentSelection ? 'MULTI_COMPONENT_SELECTION' : t,
-        width: isMultiComponentSelection
-          ? Math.round(Math.max(...componentNodes.map(n => n.x + n.width)) - Math.min(...componentNodes.map(n => n.x)))
-          : node.width,
-        height: isMultiComponentSelection
-          ? Math.round(Math.max(...componentNodes.map(n => n.y + n.height)) - Math.min(...componentNodes.map(n => n.y)))
-          : node.height,
+        type: t,
+        width: node.width,
+        height: node.height,
         variantProperties: null,     // COMPONENT_SET의 variant 정의
         componentProperties: null,   // INSTANCE/COMPONENT의 현재 변형 값
         variantInstances: [],        // COMPONENT_SET의 자식 COMPONENT 들
@@ -3034,20 +2070,6 @@ figma.ui.onmessage = async (msg) => {
         if (t === 'INSTANCE' && 'componentProperties' in node) {
           try { compData.componentProperties = node.componentProperties; } catch (e) { /* */ }
         }
-        if (isMultiComponentSelection) {
-          compData.variantProperties = compData.variantProperties || { selectedStates: { values: componentNodes.map(n => n.name) } };
-          for (const variantNode of componentNodes) {
-            let cprops = null;
-            try { cprops = variantNode.variantProperties || variantNode.componentProperties || null; } catch (e) { /* */ }
-            compData.variantInstances.push({
-              name: variantNode.name,
-              width: variantNode.width,
-              height: variantNode.height,
-              type: variantNode.type,
-              variantProperties: cprops,
-            });
-          }
-        }
       } catch (e) { /* */ }
 
       // 텍스트와 주요 레이어 수집 (최대 깊이 5)
@@ -3067,46 +2089,19 @@ figma.ui.onmessage = async (msg) => {
           for (const c of n.children) walk(c, depth + 1);
         }
       }
-      for (const componentNode of componentNodes) walk(componentNode, 0);
+      walk(node, 0);
       // 텍스트는 중복 제거, 30개 컷
       compData.texts = [...new Set(compData.texts)].slice(0, 60);
       compData.layers = compData.layers.slice(0, 200);
 
       // PNG 추출
       let imageB64 = null;
-      let tempFrame = null;
       try {
-        let exportNode = node;
-        if (isMultiComponentSelection) {
-          tempFrame = figma.createFrame();
-          tempFrame.name = 'component-preview-export-temp';
-          tempFrame.fills = [];
-          tempFrame.clipsContent = false;
-          const GAP = 24;
-          let x = 0;
-          let maxH = 0;
-          for (const componentNode of componentNodes) {
-            const clone = componentNode.clone();
-            clone.x = x;
-            clone.y = 0;
-            tempFrame.appendChild(clone);
-            x += clone.width + GAP;
-            maxH = Math.max(maxH, clone.height);
-          }
-          tempFrame.resize(Math.max(1, x - GAP), Math.max(1, maxH));
-          tempFrame.x = figma.viewport.center.x - tempFrame.width / 2;
-          tempFrame.y = figma.viewport.center.y - tempFrame.height / 2;
-          figma.currentPage.appendChild(tempFrame);
-          exportNode = tempFrame;
-        }
-        const bytes = await exportNode.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: 2 } });
+        const bytes = await node.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: 2 } });
         imageB64 = (typeof figma.base64Encode === 'function')
           ? figma.base64Encode(bytes)
           : bytesToBase64(bytes);
       } catch (e) { /* */ }
-      finally {
-        try { if (tempFrame && !tempFrame.removed) tempFrame.remove(); } catch (e) { /* */ }
-      }
 
       figma.ui.postMessage({
         type: 'component-data',
