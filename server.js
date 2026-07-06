@@ -521,6 +521,7 @@ ${designSystem}
     // Tier 5 — 플로우
     if (f.hasDimOverlay) lines.push(`### [플로우·모달] 딤(dim) 처리된 배경이 감지됨 → 이 화면에는 모달/다이얼로그가 떠 있습니다.`);
     if (f.modals?.length)      lines.push(`### [플로우] 모달/다이얼로그: ${f.modals.join(', ')} (모달 UI로 읽고 모달 구현 기능을 명세에 포함할 것)`);
+    if (f.modalDetails?.length) lines.push(`### [플로우·모달상세] 모달 내부 상세 항목(누락 금지):\n  ${f.modalDetails.join('\n  ')}`);
     if (f.drawers?.length)     lines.push(`### [플로우] 드로어: ${f.drawers.join(', ')}`);
     if (f.steppers?.length)    lines.push(`### [플로우] 스텝퍼: ${f.steppers.join(', ')}`);
     if (f.paginations?.length) lines.push(`### [플로우] 페이지네이션: ${f.paginations.join(', ')}`);
@@ -550,7 +551,7 @@ ${imagePaths.map((p, i) => `- 화면 ${i + 1}: @${p}`).join('\n')}
 - 표(테이블)의 컬럼명과 셀 내용 (예: 권한 컬럼의 "소유자/관리자/일반회원")
 - 드롭다운·셀렉트의 선택지
 - 타이틀·섹션 제목
-- **모달/팝업**: 배경이 어둡게 딤(dim) 처리되고 가운데에 카드가 떠 있으면 모달입니다. 모달 제목·입력·버튼을 읽고 "모달 구현" 기능으로 명세하세요.
+- **모달/팝업**: 배경이 어둡게 딤(dim) 처리되고 가운데에 카드가 떠 있으면 모달입니다. 모달 제목·입력·버튼뿐 아니라 카드 안의 모든 라벨-값 행(예: 유형/상태/요청 시간/점검자/설명)을 끝까지 읽고 기능에 반영하세요.
 아래 레이어 구조 정보는 **보조 자료**일 뿐입니다. 이미지에 보이는 것이 우선입니다.
 
 ---
@@ -607,6 +608,11 @@ ${includeCommon ? `**공통 기능 명세 모드 (🧱 공통기능 읽기 = ON)
 - 따라서 모달 기능의 FE 할일에는 최소한: **모달 표시/딤 오버레이 + (취소/닫기/아니오 — 실제 라벨) 버튼·X 버튼·딤 배경 클릭으로 닫기 + 닫을 때 딤 배경 해제 + 필요 시 변경 롤백 + 포커스 트랩·폼 검증**이 들어갑니다.
 - 모달 뒤의 딤 처리된(흐려진) 본문 요소는 모달에 가려진 상태이므로, 그것들로 별도 기능을 또 만들지 말고 모달 내용에 집중하세요.
 - (예외) 모달 기능의 FE 할일은 닫기 동작 3종을 모두 담아야 하므로 40자 제한을 넘겨도 됩니다.
+- **모달 내부 상세 정보 규칙:** 모달 카드 안에 라벨-값 행이나 테이블형 상세 목록이 있으면, 이것을 "모달 구현" 한 줄로 뭉개지 말고 **상세 정보 조회/표시 기능**으로 반드시 반영하세요.
+  - 예: "유형: 비계", "상태: 위험", "요청 시간: 05-31 수 오전 11:03", "점검자: 김혜연", "설명: ..." 이 보이면 FE에 해당 항목 라벨과 값 표시를 포함하고, BE에는 상세 조회 API가 이 필드를 제공한다고 적습니다.
+  - 모달 내부의 사진/현장 이미지와 그 위 표시 영역은 모달 자체와 별개로 **상세 이미지/현장 사진 표시**로 읽습니다.
+  - "주의", "위험", "완료" 같은 뱃지/알림 문구는 상태 표시 기능에서 실제 문구를 그대로 사용하세요.
+  - 이미지 하단이나 카드 하단에 보이는 행을 절대 생략하지 마세요. 글자가 작아도 Read 이미지와 "[플로우·모달상세]" 정보를 함께 보고 모두 반영하세요.
 
 **토스트 알림 규칙 (고정 — 항상 동일하게 명세)**
 - 화면에 토스트/스낵바(저장 완료, 전송됨, 오류 등 일시 알림)가 있거나, 액션 성공/실패 피드백이 필요하면 토스트 동작을 명세에 포함하세요.
@@ -859,6 +865,8 @@ function buildFastSpecPrompt(frameData, docSection, hasDocs, imagePaths, previou
     if (f.hasTable) lines.push('- 테이블/목록 있음');
     if (f.hasScroll) lines.push('- 스크롤 있음');
     if (f.paginations?.length) lines.push(`- 페이지네이션: ${f.paginations.join(', ')}`);
+    if (f.modals?.length) lines.push(`- 모달/팝업: ${f.modals.join(', ')}`);
+    if (f.modalDetails?.length) lines.push(`- 모달 내부 상세 항목: ${f.modalDetails.join(' / ')}`);
     if (f.contextNotes?.length) lines.push(`- 주석/설명: ${f.contextNotes.join(' / ')}`);
     if (f.allTexts?.length) lines.push(`- 레이어 텍스트: ${f.allTexts.slice(0, 80).join(' / ')}`);
     return lines.join('\n');
@@ -885,6 +893,8 @@ ${prev}
 - 사이드바/GNB 메뉴 이동은 기능으로 만들지 않습니다. 활성 메뉴는 현재 화면 맥락으로만 사용합니다.
 - 테이블 안의 사진/이미지/현장 사진은 모달이 아니라 썸네일입니다. "사진 썸네일 표시"로 적습니다.
 - 화면 전체/본문 대부분을 덮는 딤 배경 + 중앙 카드가 함께 있을 때만 모달입니다. 사진 위 딤/그라데이션은 모달이 아닙니다.
+- 진짜 모달이면 제목, X 닫기, 딤 닫기, 내부 사진/이미지, 알림 카드, 라벨-값 상세 항목을 모두 읽습니다.
+- 모달 내부에 "유형/상태/요청 시간/점검자/설명" 같은 행이 보이면 "상세 정보 조회/표시" 기능에 정확한 항목명을 모두 포함합니다. "모달 표시" 한 줄로 뭉개지 않습니다.
 - 테이블에 스크롤이 없고 하단이 잘리지 않았으며 보이는 행 수가 명확하면 더 많은 목록을 추측하지 않습니다.
 - 페이지네이션이 보이면 무한스크롤로 쓰지 말고 페이지네이션 목록 조회로 씁니다.
 - anchor는 해당 UI/컴포넌트의 좌측 상단 근처 상대 좌표입니다. 0~1 값으로 넣습니다.
@@ -940,6 +950,8 @@ function buildFeatureMdPrompt(payload, imagePaths) {
     if (f.hasScroll) lines.push('- 스크롤 영역 있음');
     if (f.listItems?.length) lines.push(`- 리스트아이템: ${f.listItems.slice(0, 10).join(', ')}`);
     if (f.badges?.length) lines.push(`- 뱃지/상태: ${f.badges.join(', ')}`);
+    if (f.modals?.length) lines.push(`- 모달/팝업: ${f.modals.join(', ')}`);
+    if (f.modalDetails?.length) lines.push(`- 모달 내부 상세 항목:\n${f.modalDetails.map(v => `  - ${v}`).join('\n')}`);
     if (f.contextNotes?.length) lines.push(`- 선택 영역 내부 주석/설명: ${f.contextNotes.join(' / ')}`);
     if (f.allTexts?.length) {
       const textLines = f.allTexts.slice(0, 160).map(t => `  - ${t}`).join('\n');
@@ -998,6 +1010,7 @@ ${reqContent ? `### 7) 첨부 요구사항정의서\n${reqContent.slice(0, 30000
 - source에 없는 API endpoint, DB schema, enum, error code, analytics event, 내부 상태머신은 invent하지 마세요.
 - 추가 텍스트는 화면만으로 부족한 도메인 맥락이므로 가장 높은 우선순위로 반영하세요.
 - 선택 영역 내부 주석/설명은 사용자의 보충 맥락으로 보고 누락 없이 반영하세요.
+- 모달 내부 상세 항목이 있으면 유형/상태/요청 시간/점검자/설명처럼 보이는 라벨-값을 요구사항 테이블과 화면 요구사항에 모두 반영하세요.
 - 변경 이력의 일자는 ${today}, 작성자는 항상 "Codex, 김혜연"으로 작성하세요.
 - filename은 feature-generator의 File Naming Rules를 따르는 영문 소문자 kebab-case .md 파일명으로 정하세요.
 
@@ -1323,6 +1336,20 @@ function buildFallbackAnalyzeResult(frameData, mode, reqFlags, reason) {
         `테이블 표시${listLimit ? `, 최대 ${listLimit}개 노출` : ''}${hasPhoto ? ', 사진 썸네일 표시' : ''}`,
         `목록 조회 API${listLimit ? `, limit=${listLimit}` : ''}`,
         '테이블/목록'
+      );
+    }
+
+    if (f.hasModal || (f.modals && f.modals.length)) {
+      const detailLabels = (f.modalDetails || [])
+        .map(v => String(v).split(':')[0].trim())
+        .filter(Boolean)
+        .slice(0, 8)
+        .join('/');
+      add(
+        `${label} 상세 모달 조회`,
+        `모달 표시${detailLabels ? `, ${detailLabels} 항목 표시` : ''}`,
+        `상세 조회 API${detailLabels ? ', 상세 필드 제공' : ''}`,
+        '모달/상세 정보'
       );
     }
 

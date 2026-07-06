@@ -389,6 +389,66 @@ function gatherShallowTexts(node, out, depth, maxDepth) {
   }
 }
 
+function gatherTextNodes(node, out, depth, maxDepth) {
+  if (depth > maxDepth) return;
+  if (node.type === 'TEXT' && node.characters && node.characters.trim()) {
+    var b = node.absoluteBoundingBox || null;
+    out.push({
+      text: node.characters.trim().replace(/\s+/g, ' '),
+      x: b ? b.x : 0,
+      y: b ? b.y : 0,
+      w: b ? b.width : 0,
+      h: b ? b.height : 0,
+    });
+  }
+  if ('children' in node) {
+    for (var i = 0; i < node.children.length; i++) gatherTextNodes(node.children[i], out, depth + 1, maxDepth);
+  }
+}
+
+function collectModalDetailRows(node) {
+  var textNodes = [];
+  gatherTextNodes(node, textNodes, 0, 8);
+  if (textNodes.length < 2) return [];
+
+  textNodes.sort(function (a, b) {
+    if (Math.abs(a.y - b.y) > 6) return a.y - b.y;
+    return a.x - b.x;
+  });
+
+  var rows = [];
+  var yTolerance = 10;
+  for (var i = 0; i < textNodes.length; i++) {
+    var item = textNodes[i];
+    var last = rows[rows.length - 1];
+    if (!last || Math.abs(last.y - item.y) > yTolerance) {
+      rows.push({ y: item.y, items: [item] });
+    } else {
+      last.items.push(item);
+      last.y = (last.y + item.y) / 2;
+    }
+  }
+
+  var details = [];
+  var labelRe = /^(유형|분류|상태|요청\s*시간|시간|일시|점검자|담당자|설명|내용|위치|현장|SOP|단계|결과|주의|위험|알림|사진)$/i;
+  for (var r = 0; r < rows.length; r++) {
+    var cells = rows[r].items
+      .sort(function (a, b) { return a.x - b.x; })
+      .map(function (it) { return it.text; })
+      .filter(Boolean);
+    if (cells.length < 2) continue;
+
+    var label = cells[0].replace(/\s+/g, ' ').trim();
+    var value = cells.slice(1).join(' ').replace(/\s+/g, ' ').trim();
+    if (!label || !value) continue;
+    if (label.length > 24 && !labelRe.test(label)) continue;
+    if (value.length > 240) value = value.slice(0, 240) + '...';
+    details.push(label + ': ' + value);
+  }
+
+  return details.slice(0, 24);
+}
+
 // chevron/드롭다운 아이콘 자식 보유 여부
 function hasChevronChild(node) {
   if (!('children' in node)) return false;
@@ -543,14 +603,17 @@ function detectModalParts(node, result) {
   if (nameIsModal || looksLikeCard) {
     var texts = [];
     gatherShallowTexts(node, texts, 0, 4);
+    var detailRows = collectModalDetailRows(node);
+    for (var i = 0; i < detailRows.length; i++) result.modalDetails.add(detailRows[i]);
     // 카드 후보일 때는 액션 버튼/제목이 실제로 있어야 모달로 인정 (오탐 방지)
     var joined = texts.join(' ');
     var hasAction = ACTION_RE.test(joined);
+    var hasDetailRows = detailRows.length >= 2;
     if (nameIsModal) {
       var title = texts.length ? texts[0].slice(0, 30) : node.name;
       result.modals.add(title);
       result.hasModal = true;
-    } else if (hasAction) {
+    } else if (hasAction || hasDetailRows) {
       var candidateTitle = texts.length ? texts[0].slice(0, 30) : node.name;
       result.modalCandidates.add(candidateTitle);
     }
@@ -701,6 +764,7 @@ function buildFrameSummary(node, opts) {
     rootH: ('height' in node) ? node.height : 0,
     hasDimOverlay: false, hasModal: false,
     modalCandidates: new Set(),
+    modalDetails: new Set(),
     // 테이블·스크롤 감지
     hasTable: false, hasScroll: false,
     componentVariants: [], texts: [], contextNotes: new Set(),
@@ -747,6 +811,7 @@ function buildFrameSummary(node, opts) {
     modals:    s(ctx.modals),
     hasDimOverlay: ctx.hasDimOverlay,
     hasModal: ctx.hasModal || ctx.modals.size > 0,
+    modalDetails: s(ctx.modalDetails).slice(0, 24),
     drawers:   s(ctx.drawers),
     steppers:  s(ctx.steppers),
     paginations: s(ctx.paginations),
