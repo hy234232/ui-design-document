@@ -449,6 +449,20 @@ function collectModalDetailRows(node) {
   return details.slice(0, 24);
 }
 
+function collectModalTextValues(node) {
+  var textNodes = [];
+  gatherTextNodes(node, textNodes, 0, 8);
+  var seen = {};
+  var values = [];
+  for (var i = 0; i < textNodes.length; i++) {
+    var text = String(textNodes[i].text || '').trim();
+    if (!text || text.length > 200 || seen[text]) continue;
+    seen[text] = true;
+    values.push(text);
+  }
+  return values.slice(0, 80);
+}
+
 // chevron/드롭다운 아이콘 자식 보유 여부
 function hasChevronChild(node) {
   if (!('children' in node)) return false;
@@ -604,18 +618,25 @@ function detectModalParts(node, result) {
     var texts = [];
     gatherShallowTexts(node, texts, 0, 4);
     var detailRows = collectModalDetailRows(node);
-    for (var i = 0; i < detailRows.length; i++) result.modalDetails.add(detailRows[i]);
     // 카드 후보일 때는 액션 버튼/제목이 실제로 있어야 모달로 인정 (오탐 방지)
     var joined = texts.join(' ');
     var hasAction = ACTION_RE.test(joined);
     var hasDetailRows = detailRows.length >= 2;
+    var accepted = false;
     if (nameIsModal) {
       var title = texts.length ? texts[0].slice(0, 30) : node.name;
       result.modals.add(title);
       result.hasModal = true;
+      accepted = true;
     } else if (hasAction || hasDetailRows) {
       var candidateTitle = texts.length ? texts[0].slice(0, 30) : node.name;
       result.modalCandidates.add(candidateTitle);
+      accepted = true;
+    }
+    if (accepted) {
+      for (var i = 0; i < detailRows.length; i++) result.modalDetails.add(detailRows[i]);
+      var modalTexts = collectModalTextValues(node);
+      for (var j = 0; j < modalTexts.length; j++) result.modalTexts.add(modalTexts[j]);
     }
   }
 }
@@ -765,6 +786,7 @@ function buildFrameSummary(node, opts) {
     hasDimOverlay: false, hasModal: false,
     modalCandidates: new Set(),
     modalDetails: new Set(),
+    modalTexts: new Set(),
     // 테이블·스크롤 감지
     hasTable: false, hasScroll: false,
     componentVariants: [], texts: [], contextNotes: new Set(),
@@ -777,45 +799,50 @@ function buildFrameSummary(node, opts) {
   }
 
   const s = set => [...set].filter(Boolean);
-  const uniqueTexts = [...new Set(ctx.texts)].filter(t => t.length > 0 && t.length < 200);
+  const isModalFocused = ctx.hasDimOverlay && (ctx.hasModal || ctx.modals.size > 0 || ctx.modalCandidates.size > 0);
+  const uniqueTexts = isModalFocused && ctx.modalTexts.size > 0
+    ? s(ctx.modalTexts).filter(t => t.length > 0 && t.length < 200)
+    : [...new Set(ctx.texts)].filter(t => t.length > 0 && t.length < 200);
 
   // 레이어이름 기반 + 내용 기반 결과 병합 (중복 제거)
   const mergedButtons = new Set([...ctx.buttons, ...ctx.actionButtons]);
   const mergedInputs  = new Set([...ctx.inputs,  ...ctx.inputFields]);
   const mergedSelects = new Set([...ctx.selects, ...ctx.selectFields]);
+  const hiddenByDim = isModalFocused;
 
   return {
     frameName: node.name,
-    activeNav: ctx.activeNav || null,   // 사이드바·GNB 활성 메뉴명만
-    titles:    s(ctx.titles),
-    tabs:      s(ctx.tabs),
-    sections:  s(ctx.sections),
-    buttons:   s(mergedButtons),
-    iconActions: s(ctx.iconActions),
-    links:     s(ctx.links),
-    inputs:    s(mergedInputs),
-    selects:   s(mergedSelects),
-    disabledFields: s(ctx.disabledFields),
-    tableHeaders: s(ctx.tableHeaders),
-    listItems: s(ctx.listItems),
-    uploads:   s(ctx.uploads),
-    checkboxes: s(ctx.checkboxes),
-    radios:    s(ctx.radios),
-    toggles:   s(ctx.toggles),
-    badges:    s(ctx.badges),
-    emptyStates: s(ctx.emptyStates),
-    alerts:    s(ctx.alerts),
-    toasts:    s(ctx.toasts),
-    hasTable:  ctx.hasTable || ctx.tableHeaders.size > 0,
-    hasScroll: ctx.hasScroll,
+    activeNav: hiddenByDim ? null : (ctx.activeNav || null),   // 사이드바·GNB 활성 메뉴명만
+    titles:    hiddenByDim ? [] : s(ctx.titles),
+    tabs:      hiddenByDim ? [] : s(ctx.tabs),
+    sections:  hiddenByDim ? [] : s(ctx.sections),
+    buttons:   hiddenByDim ? [] : s(mergedButtons),
+    iconActions: hiddenByDim ? [] : s(ctx.iconActions),
+    links:     hiddenByDim ? [] : s(ctx.links),
+    inputs:    hiddenByDim ? [] : s(mergedInputs),
+    selects:   hiddenByDim ? [] : s(mergedSelects),
+    disabledFields: hiddenByDim ? [] : s(ctx.disabledFields),
+    tableHeaders: hiddenByDim ? [] : s(ctx.tableHeaders),
+    listItems: hiddenByDim ? [] : s(ctx.listItems),
+    uploads:   hiddenByDim ? [] : s(ctx.uploads),
+    checkboxes: hiddenByDim ? [] : s(ctx.checkboxes),
+    radios:    hiddenByDim ? [] : s(ctx.radios),
+    toggles:   hiddenByDim ? [] : s(ctx.toggles),
+    badges:    hiddenByDim ? [] : s(ctx.badges),
+    emptyStates: hiddenByDim ? [] : s(ctx.emptyStates),
+    alerts:    hiddenByDim ? [] : s(ctx.alerts),
+    toasts:    hiddenByDim ? [] : s(ctx.toasts),
+    hasTable:  hiddenByDim ? false : (ctx.hasTable || ctx.tableHeaders.size > 0),
+    hasScroll: hiddenByDim ? false : ctx.hasScroll,
     modals:    s(ctx.modals),
     hasDimOverlay: ctx.hasDimOverlay,
     hasModal: ctx.hasModal || ctx.modals.size > 0,
     modalDetails: s(ctx.modalDetails).slice(0, 24),
+    dimmedBackgroundIgnored: hiddenByDim,
     drawers:   s(ctx.drawers),
     steppers:  s(ctx.steppers),
-    paginations: s(ctx.paginations),
-    componentVariants: ctx.componentVariants.slice(0, 20),
+    paginations: hiddenByDim ? [] : s(ctx.paginations),
+    componentVariants: hiddenByDim ? [] : ctx.componentVariants.slice(0, 20),
     allTexts:  uniqueTexts,
     contextNotes: s(ctx.contextNotes).slice(0, 40),
   };
