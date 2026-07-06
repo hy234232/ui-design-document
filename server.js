@@ -844,6 +844,73 @@ ${wantError ? `  "errorCases": [
 - 각 항목에는 \`devTitle\`, \`fe\`, \`be\`를 반드시 포함하세요. 플러그인 내부는 \`problem/design/components\`를, 캔버스는 \`devTitle/fe/be\`를 사용합니다.`}`;
 }
 
+function buildFastSpecPrompt(frameData, docSection, hasDocs, imagePaths, previousFeatures, includeCommon) {
+  previousFeatures = Array.isArray(previousFeatures) ? previousFeatures.filter(Boolean).slice(0, 80) : [];
+  const pageContext = (Array.isArray(frameData) ? frameData : []).map(f => {
+    const lines = [];
+    lines.push(`## 페이지: "${f.frameName || 'Untitled'}"`);
+    if (f.activeNav) lines.push(`- 현재 위치: ${f.activeNav} (기능명세 대상 아님)`);
+    if (f.titles?.length) lines.push(`- 타이틀: ${f.titles.join(', ')}`);
+    if (f.sections?.length) lines.push(`- 섹션: ${f.sections.join(', ')}`);
+    if (f.buttons?.length) lines.push(`- 버튼: ${f.buttons.join(', ')}`);
+    if (f.selects?.length) lines.push(`- 셀렉트: ${f.selects.join(', ')}`);
+    if (f.inputs?.length) lines.push(`- 입력필드: ${f.inputs.join(', ')}`);
+    if (f.tableHeaders?.length) lines.push(`- 테이블컬럼: ${f.tableHeaders.join(', ')}`);
+    if (f.hasTable) lines.push('- 테이블/목록 있음');
+    if (f.hasScroll) lines.push('- 스크롤 있음');
+    if (f.paginations?.length) lines.push(`- 페이지네이션: ${f.paginations.join(', ')}`);
+    if (f.contextNotes?.length) lines.push(`- 주석/설명: ${f.contextNotes.join(' / ')}`);
+    if (f.allTexts?.length) lines.push(`- 레이어 텍스트: ${f.allTexts.slice(0, 80).join(' / ')}`);
+    return lines.join('\n');
+  }).join('\n\n');
+  const images = imagePaths.length
+    ? imagePaths.map((p, i) => `- 화면 ${i + 1}: @${p}`).join('\n')
+    : '- 이미지 없음';
+  const prev = previousFeatures.length ? previousFeatures.map((n, i) => `${i + 1}. ${n}`).join('\n') : '(없음)';
+  return `당신은 Figma 화면을 보고 기능명세 JSON을 만드는 시니어 PM입니다.
+
+## 반드시 먼저 볼 화면 이미지
+${images}
+
+## 보조 레이어 정보
+${pageContext}
+
+${hasDocs ? `## 첨부 문서\n${docSection.slice(0, 18000)}` : ''}
+
+## 이전에 이미 명세한 기능(중복 금지)
+${prev}
+
+## 읽기 규칙
+- 이미지에 보이는 실제 글자, 버튼, 표 컬럼, 표 셀, 드롭다운, 뱃지, 페이지네이션을 우선 근거로 삼습니다.
+- 사이드바/GNB 메뉴 이동은 기능으로 만들지 않습니다. 활성 메뉴는 현재 화면 맥락으로만 사용합니다.
+- 테이블 안의 사진/이미지/현장 사진은 모달이 아니라 썸네일입니다. "사진 썸네일 표시"로 적습니다.
+- 화면 전체/본문 대부분을 덮는 딤 배경 + 중앙 카드가 함께 있을 때만 모달입니다. 사진 위 딤/그라데이션은 모달이 아닙니다.
+- 테이블에 스크롤이 없고 하단이 잘리지 않았으며 보이는 행 수가 명확하면 더 많은 목록을 추측하지 않습니다.
+- 페이지네이션이 보이면 무한스크롤로 쓰지 말고 페이지네이션 목록 조회로 씁니다.
+- anchor는 해당 UI/컴포넌트의 좌측 상단 근처 상대 좌표입니다. 0~1 값으로 넣습니다.
+- features는 화면 좌측 상단에서 우측 하단 순서로 정렬합니다.
+- 화면에서 근거가 약한 기능은 만들지 않습니다.
+- ${includeCommon ? '공통 헤더/사이드바 기능도 화면에 보이는 범위에서 포함할 수 있습니다.' : '공통 헤더/사이드바 기능은 제외합니다.'}
+
+## 출력
+JSON 객체만 출력하세요. 설명/코드펜스 금지.
+{
+  "overview": {
+    "title": "화면 이름",
+    "purpose": "사용자가 이 화면에서 할 수 있는 일 1~2문장"
+  },
+  "features": [
+    {
+      "feature": "기능명",
+      "icon": "관련 이모지 1개",
+      "fe": "FE 구현 할일 40자 이내",
+      "be": "BE 구현 할일 40자 이내",
+      "anchor": { "x": 0.1, "y": 0.2, "note": "가리키는 UI" }
+    }
+  ]
+}`;
+}
+
 function buildFeatureMdPrompt(payload, imagePaths) {
   const frameData = Array.isArray(payload.frameData) ? payload.frameData : [];
   const generatedFeatures = Array.isArray(payload.generatedFeatures) ? payload.generatedFeatures : [];
@@ -1809,7 +1876,9 @@ JSON 객체 1개만 출력하세요. 코드펜스 금지.
 
         const promptFrameData = compactAnalyzeFrameData(frameData);
         const promptImagePaths = imagePaths.slice(0, promptFrameData.length > 3 ? 1 : 2);
-        const prompt = buildPrompt(promptFrameData, docSection, hasDocs, promptImagePaths, previousFeatures || [], !!includeCommon, effMode, reqFlags);
+        const prompt = (effMode === 'spec' && promptImagePaths.length)
+          ? buildFastSpecPrompt(promptFrameData, docSection, hasDocs, promptImagePaths, previousFeatures || [], !!includeCommon)
+          : buildPrompt(promptFrameData, docSection, hasDocs, promptImagePaths, previousFeatures || [], !!includeCommon, effMode, reqFlags);
 
         // 디버그 덤프 — 무엇을 읽었고 무엇을 받았는지 추적
         try {
