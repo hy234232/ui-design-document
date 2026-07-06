@@ -1978,15 +1978,16 @@ JSON 객체 1개만 출력하세요. 코드펜스 금지.
         if (!fs.existsSync(imgDir)) fs.mkdirSync(imgDir, { recursive: true });
         const imagePaths = [];
         frameData.forEach((f, i) => {
-          if (f.image) {
-            try {
-              const p = path.join(imgDir, `feature-md-frame-${i + 1}.png`);
-              fs.writeFileSync(p, Buffer.from(f.image, 'base64'));
-              imagePaths.push(p);
-              f._imagePath = p;
-            } catch (ie) { /* ignore */ }
-          }
           delete f.image;
+        });
+        const attachedImages = Array.isArray(payload.attachedImages) ? payload.attachedImages : [];
+        attachedImages.forEach((img, i) => {
+          if (!img || !img.image) return;
+          try {
+            const p = path.join(imgDir, `feature-md-attach-${i + 1}.png`);
+            fs.writeFileSync(p, Buffer.from(img.image, 'base64'));
+            imagePaths.push(p);
+          } catch (ie) { /* ignore */ }
         });
 
         const localMd = buildLocalFeatureMarkdown(payload, frameData, imagePaths.length);

@@ -168,6 +168,13 @@
   }
   .md-builder textarea:focus { outline: 1px solid #7c6af7; border-color: #7c6af7; }
   .md-builder-help { font-size: 10px; color: #777; line-height: 1.6; }
+  .md-image-tools { display: flex; gap: 6px; align-items: center; }
+  .md-image-list {
+    display: none; flex-direction: column; gap: 4px;
+    background: #202020; border: 1px solid #2d2d2d; border-radius: 6px;
+    padding: 7px 9px;
+  }
+  .md-image-item { font-size: 10px; color: #7e8592; line-height: 1.5; }
   .md-extra-preview {
     display: none;
     font-size: 10px; color: #6f7480; line-height: 1.6;
@@ -461,9 +468,15 @@
       </div>
       <textarea id="featureMdExtraText" placeholder="추가 텍스트를 입력하세요. 예: SOP 상태 4종류는 위험 단계 1~3단계에 따라 종류가 달라짐. 단계별 상태 기준과 보고서 작성 조건을 기능명세에 반영."></textarea>
       <div id="featureMdExtraPreview" class="md-extra-preview"></div>
+      <input type="file" id="featureMdImageInput" accept="image/*" multiple onchange="onFeatureMdImageFiles(this)" />
+      <div class="md-image-tools">
+        <button class="btn btn-icon" type="button" onclick="triggerFile('featureMdImageInput')" title="MD에 넣을 이미지만 선택">이미지 첨부</button>
+        <button class="btn btn-icon" type="button" onclick="clearFeatureMdImages()" title="첨부 이미지 초기화">초기화</button>
+      </div>
+      <div id="featureMdImageList" class="md-image-list"></div>
       <button class="btn btn-primary" id="generateFeatureMdBtn" onclick="generateFeatureMd()">기능명세 MD 생성</button>
       <div class="md-builder-help">
-        Figma 화면과 기능설명 영역을 함께 선택한 뒤 실행하세요. 선택 영역 내부의 주석/설명 텍스트와 위 추가 텍스트를 함께 읽어 feature-generator 스킬 형식의 MD를 로컬에 저장합니다.
+        Figma 화면과 기능설명 영역을 함께 선택한 뒤 실행하세요. MD에 넣을 이미지는 이 영역에 붙여넣거나 첨부한 것만 저장됩니다.
       </div>
       <div id="featureMdResult"></div>
     </div>
@@ -788,6 +801,7 @@
 
   // ── IA 탭 ──
   let iaImageBase64 = null;
+  let featureMdImages = [];
 
   // 큰 이미지를 캔버스로 리사이즈해서 base64 PNG로 반환 (긴 변 최대 maxDim)
   function resizeImageToBase64(file, maxDim) {
@@ -857,6 +871,53 @@
     processIAFile(file);
   }
 
+  function renderFeatureMdImages() {
+    const box = document.getElementById('featureMdImageList');
+    if (!box) return;
+    if (!featureMdImages.length) {
+      box.style.display = 'none';
+      box.innerHTML = '';
+      return;
+    }
+    box.style.display = 'flex';
+    box.innerHTML = featureMdImages.map((img, i) => `
+      <div class="md-image-item">${i + 1}. ${esc(img.name || '붙여넣은 이미지')} · ${img.w}×${img.h}px · 약 ${fmtKB(img.bytes || 0)}</div>
+    `).join('');
+  }
+
+  async function addFeatureMdImageFile(file, name) {
+    if (!file || !file.type || !file.type.startsWith('image/')) return;
+    const r = await resizeImageToBase64(file, 1800);
+    featureMdImages.push({
+      name: name || file.name || `image-${featureMdImages.length + 1}.png`,
+      image: r.b64,
+      w: r.w,
+      h: r.h,
+      bytes: Math.round(r.b64.length * 0.75),
+    });
+    renderFeatureMdImages();
+  }
+
+  async function onFeatureMdImageFiles(input) {
+    const files = Array.from((input && input.files) || []);
+    if (!files.length) return;
+    try {
+      setStatus('MD 첨부 이미지 처리 중...', 'loading');
+      for (const file of files) await addFeatureMdImageFile(file, file.name);
+      setStatus(`✅ MD 첨부 이미지 ${featureMdImages.length}개 준비됨`, 'success');
+    } catch (e) {
+      setStatus('MD 첨부 이미지 처리 실패: ' + e.message, 'error');
+    } finally {
+      if (input) input.value = '';
+    }
+  }
+
+  function clearFeatureMdImages() {
+    featureMdImages = [];
+    renderFeatureMdImages();
+    setStatus('MD 첨부 이미지가 초기화되었습니다.', 'success');
+  }
+
   // 드래그-드롭
   (function setupIADrop() {
     const zone = document.getElementById('iaDropZone');
@@ -876,12 +937,19 @@
   // 페이스트 — IA 탭이 활성일 때만
   document.addEventListener('paste', (e) => {
     const iaTab = document.querySelector('.tab[data-tab="ia"]');
-    if (!iaTab || !iaTab.classList.contains('active')) return;
+    const specTab = document.querySelector('.tab[data-tab="spec"]');
+    if ((!iaTab || !iaTab.classList.contains('active')) && (!specTab || !specTab.classList.contains('active'))) return;
     const items = (e.clipboardData && e.clipboardData.items) || [];
     for (const item of items) {
       if (item.type && item.type.startsWith('image/')) {
         const blob = item.getAsFile();
-        processIAFile(blob);
+        if (specTab && specTab.classList.contains('active')) {
+          addFeatureMdImageFile(blob, `clipboard-${featureMdImages.length + 1}.png`)
+            .then(() => setStatus(`✅ MD 첨부 이미지 ${featureMdImages.length}개 준비됨`, 'success'))
+            .catch(err => setStatus('MD 첨부 이미지 처리 실패: ' + err.message, 'error'));
+        } else {
+          processIAFile(blob);
+        }
         break;
       }
     }
@@ -1438,6 +1506,7 @@
             generatedFeatures: lastFeatures || [],
             overview: lastOverview || null,
             additionalText: extraText,
+            attachedImages: featureMdImages.map(img => ({ name: img.name, image: img.image })),
             prdContent: docs.prd?.content || null,
             reqContent: docs.req?.content || null,
           }),
