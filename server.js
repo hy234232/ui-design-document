@@ -677,6 +677,8 @@ ${pageContext}
 4. BE: 해당 기능의 API·비즈니스 로직·DB·인증
 5. 각 할일은 40자 이내 한 줄
 6. 장식용 UI(구분선·배경·아이콘만 있는 요소)는 제외
+- BE 할 일이 없는 순수 FE/UI 기능이면 \`be\`에 절대 \`N/A\`, \`n/a\`, \`해당 없음\`, \`없음\`만 쓰지 마세요. 항상 \`없음(이유)\` 형식으로 씁니다.
+  - 예: \`없음(정적 UI)\`, \`없음(프론트 UI 처리)\`, \`없음(클라이언트 상태 관리)\`
 
 ## 완전성(누락 금지) 규칙 — 매우 중요
 - 화면의 **모든 상호작용 요소를 빠짐없이** 기능으로 다루세요. 다음은 각각 최소 1개 기능에 대응되어야 합니다:
@@ -712,6 +714,7 @@ ${wantError ? '- ✅ 에러케이스(errorCases): 데이터/에러/권한/프로
 - \`devTitle\`, \`fe\`, \`be\`는 Figma 캔버스에 표시되는 **개발자 관점** 문장입니다. 첨부 이미지의 분류처럼 "에러 케이스 = 시스템이 잘못된 상태", "엣지 케이스 = 정상 범위의 경계 상황"을 구분해 타이틀을 작성하세요.
 - 캔버스용 \`fe\`는 사용자가 보게 되는 UI 처리, 상태 컴포넌트, 인터랙션 방어 로직 중심으로 작성하세요.
 - 캔버스용 \`be\`는 API 응답, 검증, 권한, 상태 코드, 재시도/캐시/락 정책 중심으로 작성하세요.
+- 캔버스용 \`be\`에 백엔드 할 일이 없으면 \`N/A\`, \`n/a\`, \`해당 없음\`, \`없음\`만 쓰지 말고 항상 \`없음(이유)\`로 씁니다. 예: \`없음(정적 UI)\`, \`없음(프론트 UI 처리)\`.
 - 화면/문서에 직접 관련 없는 항목은 줄이고, 관련도가 높은 항목을 우선합니다.
 
 ## UX 라이팅 규칙 — 반드시 지킬 것
@@ -933,6 +936,7 @@ ${prev}
 - anchor는 해당 UI/컴포넌트의 좌측 상단 근처 상대 좌표입니다. 0~1 값으로 넣습니다.
 - features는 화면 좌측 상단에서 우측 하단 순서로 정렬합니다.
 - 화면에서 근거가 약한 기능은 만들지 않습니다.
+- BE 할 일이 없는 순수 FE/UI 기능이면 \`be\`는 항상 \`없음(이유)\` 형식으로 씁니다. \`N/A\`, \`n/a\`, \`해당 없음\`, \`없음\` 단독 표기는 금지합니다.
 - ${includeCommon ? '공통 헤더/사이드바 기능도 화면에 보이는 범위에서 포함할 수 있습니다.' : '공통 헤더/사이드바 기능은 제외합니다.'}
 
 ## 출력
@@ -1108,13 +1112,16 @@ function compactFrameNotes(frameData) {
 function normalizeFeatureRows(payload, frameData) {
   const generated = Array.isArray(payload.generatedFeatures) ? payload.generatedFeatures : [];
   if (generated.length) {
-    return generated.map((f, i) => ({
+    return generated.map((raw, i) => {
+      const f = normalizeBackendTodoItem(raw);
+      return ({
       id: `REQ-${String(i + 1).padStart(3, '0')}`,
       name: f.feature || `기능 ${i + 1}`,
       fe: f.fe || '원문 기준 추가 정의 필요',
       be: f.be || '원문 기준 추가 정의 필요',
       source: f.anchor && f.anchor.note ? f.anchor.note : '',
-    }));
+    });
+    });
   }
 
   const notes = compactFrameNotes(frameData).slice(0, 12);
@@ -1338,6 +1345,47 @@ function makeFallbackFeature(name, fe, be, anchorNote) {
     be: be || '관련 데이터 조회',
     anchor: anchorNote ? { x: 0.08, y: 0.16, note: anchorNote } : null,
   };
+}
+
+function isNoneBackendText(value) {
+  const text = String(value == null ? '' : value).trim().replace(/[.!。]+$/g, '');
+  if (!text) return true;
+  if (/^없음\s*[\(（][^)）]+[\)）]\s*$/.test(text)) return false;
+  return /^(n\/?a|na|none|null|nil|해당\s*없음|없음|무|-|—)(\s*[\(（:：-].*)?$/i.test(text);
+}
+
+function normalizeNoneBackendText(value, reason) {
+  const text = String(value == null ? '' : value).trim();
+  if (/^없음\s*[\(（][^)）]+[\)）]\s*$/.test(text)) return text.replace(/[（]/g, '(').replace(/[）]/g, ')');
+  const colon = text.match(/^없음\s*[:：-]\s*(.+)$/);
+  if (colon && colon[1]) return `없음(${colon[1].trim()})`;
+  return `없음(${reason || '서버 처리 없음'})`;
+}
+
+function inferNoBackendReason(item) {
+  item = item || {};
+  const text = [
+    item.feature, item.devTitle, item.fe, item.problem, item.design,
+    item.components, item.categoryTitle,
+  ].filter(Boolean).join(' ');
+  if (/정적|문구|라벨|텍스트|안내|카피|유의사항/.test(text)) return '정적 UI';
+  if (/체크박스|토글|활성|비활성|상태 관리|클라이언트 상태|필터 패널|탭/.test(text)) return '클라이언트 상태 관리';
+  if (/여백|구분선|빈 영역|레이아웃|스타일|말줄임|툴팁|줄바꿈|플레이스홀더|아이콘|이미지|아바타|모달|토스트|닫기|포커스|스크롤|반응형/.test(text)) return '프론트 UI 처리';
+  if (/검증|입력|폼/.test(text)) return '클라이언트 검증';
+  return '서버 처리 없음';
+}
+
+function normalizeBackendTodoItem(item) {
+  if (!item || typeof item !== 'object') return item;
+  const copy = Object.assign({}, item);
+  if (isNoneBackendText(copy.be)) {
+    copy.be = normalizeNoneBackendText(copy.be, inferNoBackendReason(copy));
+  }
+  return copy;
+}
+
+function normalizeBackendTodos(items) {
+  return Array.isArray(items) ? items.map(normalizeBackendTodoItem) : [];
 }
 
 function buildFallbackAnalyzeResult(frameData, mode, reqFlags, reason) {
@@ -2000,6 +2048,9 @@ JSON 객체 1개만 출력하세요. 코드펜스 금지.
             edgeCases = edgeCases.concat(tagged);
           }
         }
+        features = normalizeBackendTodos(features);
+        edgeCases = normalizeBackendTodos(edgeCases);
+        errorCases = normalizeBackendTodos(errorCases);
         const cornerCount = edgeCases.filter(it => it && it.tag === '복잡/희귀').length;
         console.log(`[완료] mode=${effMode} · features ${features.length} · edge ${edgeCases.length}(복잡/희귀 ${cornerCount}) · error ${errorCases.length}${overview ? ' | overview' : ''}`);
 
