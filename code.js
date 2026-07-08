@@ -1052,6 +1052,10 @@ function clampBadgePosition(x, y, badge, bounds) {
 }
 
 // ── 선택 프레임 복제 + 핑크 뱃지 오버레이 (원본 아래 80px) ──
+function preserveFrameName(name) {
+  return String(name || '프레임').replace(/\s+\(기능 위치\)\s*$/g, '').trim() || '프레임';
+}
+
 async function createLabeledClone(sourceNodeId, features, fontFamily, blackStyle) {
   if (!sourceNodeId) return null;
   var source = null;
@@ -1064,8 +1068,9 @@ async function createLabeledClone(sourceNodeId, features, fontFamily, blackStyle
   if (!source.absoluteBoundingBox) return null;
 
   var srcBox = source.absoluteBoundingBox;
+  var originalName = preserveFrameName(source.name);
   var clone = source.clone();
-  clone.name = source.name + ' (기능 위치)';
+  clone.name = originalName;
   figma.currentPage.appendChild(clone);
   clone.x = srcBox.x;
   clone.y = srcBox.y + srcBox.height + 80;
@@ -1104,7 +1109,7 @@ async function createLabeledClone(sourceNodeId, features, fontFamily, blackStyle
   if (badges.length > 0) {
     try {
       var group = figma.group([clone].concat(badges), figma.currentPage);
-      group.name = source.name + ' (기능 위치)';
+      group.name = originalName;
       return { x: group.x, y: group.y, width: group.width, height: group.height };
     } catch (ge) {
       return { x: cloneX, y: cloneY, width: cloneW, height: cloneH };
